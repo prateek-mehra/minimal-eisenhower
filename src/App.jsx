@@ -47,6 +47,10 @@ export default function App() {
     )
   }
 
+  const clearCompleted = () => {
+  setTasks(prev => prev.filter(t => !t.completed))
+}
+
   const reorderTasks = (quadrantTasks, from, to) => {
     const reordered = arrayMove(quadrantTasks, from, to)
 
@@ -115,9 +119,19 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
-      <h1 className="text-2xl font-semibold mb-6">
-        Eisenhower Matrix
-      </h1>
+      <div className="flex items-center justify-between mb-6">
+  <h1 className="text-2xl font-semibold">
+    Eisenhower Matrix
+  </h1>
+
+  <button
+    onClick={clearCompleted}
+    className="text-sm px-3 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+  >
+    Clear completed
+  </button>
+</div>
+
 
       <DndContext
         collisionDetection={closestCenter}
