@@ -2,6 +2,7 @@ import { useState } from "react"
 import {
   DndContext,
   closestCenter,
+  useDroppable,
 } from "@dnd-kit/core"
 
 import {
@@ -29,13 +30,12 @@ export default function App() {
     setTasks(prev => [
       ...prev,
       {
-  id: crypto.randomUUID(),
-  title,
-  quadrant,
-  completed: false,
-  order: tasks.filter(t => t.quadrant === quadrant).length,
-
-},
+        id: crypto.randomUUID(),
+        title,
+        quadrant,
+        completed: false,
+        order: prev.filter(t => t.quadrant === quadrant).length,
+      },
     ])
   }
 
@@ -48,23 +48,70 @@ export default function App() {
   }
 
   const reorderTasks = (quadrantTasks, from, to) => {
-  const reordered = arrayMove(quadrantTasks, from, to)
+    const reordered = arrayMove(quadrantTasks, from, to)
 
-  // reassign order explicitly
-  const updated = reordered.map((task, index) => ({
-    ...task,
-    order: index,
-  }))
+    const updated = reordered.map((task, index) => ({
+      ...task,
+      order: index,
+    }))
 
-  setTasks(prev => {
-    const quadrantId = quadrantTasks[0].quadrant
-    const others = prev.filter(t => t.quadrant !== quadrantId)
-    return [...others, ...updated]
-  })
-}
+    setTasks(prev => {
+      const quadrantId = quadrantTasks[0].quadrant
+      const others = prev.filter(t => t.quadrant !== quadrantId)
+      return [...others, ...updated]
+    })
+  }
 
+  const handleDragEnd = ({ active, over }) => {
+    if (!over) return
 
+    const activeTask = tasks.find(t => t.id === active.id)
+    if (!activeTask) return
 
+    const sourceQuadrant = activeTask.quadrant
+    const targetQuadrant =
+      over.data?.current?.quadrant ?? sourceQuadrant
+
+    if (sourceQuadrant === targetQuadrant) {
+      const quadrantTasks = tasks
+        .filter(t => t.quadrant === sourceQuadrant)
+        .sort((a, b) => a.order - b.order)
+
+      const oldIndex = quadrantTasks.findIndex(t => t.id === active.id)
+      const newIndex = quadrantTasks.findIndex(t => t.id === over.id)
+
+      if (oldIndex !== newIndex) {
+        reorderTasks(quadrantTasks, oldIndex, newIndex)
+      }
+      return
+    }
+
+    setTasks(prev => {
+      const sourceTasks = prev
+        .filter(t => t.quadrant === sourceQuadrant && t.id !== active.id)
+        .sort((a, b) => a.order - b.order)
+        .map((t, i) => ({ ...t, order: i }))
+
+      const targetTasks = prev
+        .filter(t => t.quadrant === targetQuadrant)
+        .sort((a, b) => a.order - b.order)
+
+      const movedTask = {
+        ...activeTask,
+        quadrant: targetQuadrant,
+        order: targetTasks.length,
+      }
+
+      return [
+        ...prev.filter(
+          t => t.quadrant !== sourceQuadrant && t.quadrant !== targetQuadrant
+        ),
+        ...sourceTasks,
+        ...targetTasks,
+        movedTask,
+      ]
+    })
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -72,28 +119,36 @@ export default function App() {
         Eisenhower Matrix
       </h1>
 
-      <div className="grid grid-cols-2 grid-rows-2 gap-4 h-[80vh]">
-        {QUADRANTS.map(q => (
-          <Quadrant
-            key={q.id}
-            quadrant={q}
-            tasks={tasks
-              .filter(t => t.quadrant === q.id)
-              .sort((a, b) => a.order - b.order)
-            }
-            onAddTask={addTask}
-            onToggleTask={toggleTask}
-            onReorder={reorderTasks}
-          />
-        ))}
-      </div>
+      <DndContext
+        collisionDetection={closestCenter}
+        onDragEnd={handleDragEnd}
+      >
+        <div className="grid grid-cols-2 grid-rows-2 gap-4 h-[80vh]">
+          {QUADRANTS.map(q => (
+            <Quadrant
+              key={q.id}
+              quadrant={q}
+              tasks={tasks
+                .filter(t => t.quadrant === q.id)
+                .sort((a, b) => a.order - b.order)
+              }
+              onAddTask={addTask}
+              onToggleTask={toggleTask}
+            />
+          ))}
+        </div>
+      </DndContext>
     </div>
   )
 }
 
-function Quadrant({ quadrant, tasks, onAddTask, onToggleTask, onReorder })
- {
+function Quadrant({ quadrant, tasks, onAddTask, onToggleTask }) {
   const [input, setInput] = useState("")
+
+  const { setNodeRef } = useDroppable({
+    id: quadrant.id,
+    data: { quadrant: quadrant.id },
+  })
 
   const handleAdd = () => {
     onAddTask(input, quadrant.id)
@@ -103,48 +158,31 @@ function Quadrant({ quadrant, tasks, onAddTask, onToggleTask, onReorder })
   return (
     <div className="bg-white rounded-xl border border-gray-200 p-4 flex flex-col">
       <div className="mb-3">
-        <h2 className="text-sm font-semibold text-gray-900">
-          {quadrant.title}
-        </h2>
-        <p className="text-xs text-gray-500">
-          {quadrant.subtitle}
-        </p>
+        <h2 className="text-sm font-semibold">{quadrant.title}</h2>
+        <p className="text-xs text-gray-500">{quadrant.subtitle}</p>
       </div>
 
-      {/* Task list */}
-      <DndContext
-  collisionDetection={closestCenter}
-  onDragEnd={(event) => {
-    const { active, over } = event
-    if (!over || active.id === over.id) return
+      <SortableContext
+        items={tasks.map(t => t.id)}
+        strategy={verticalListSortingStrategy}
+      >
+        <div
+          ref={setNodeRef}
+          className="flex-1 space-y-2 overflow-auto"
+        >
+          {tasks.map(task => (
+            <SortableTask
+              key={task.id}
+              task={task}
+              onToggle={onToggleTask}
+            />
+          ))}
+        </div>
+      </SortableContext>
 
-    const oldIndex = tasks.findIndex(t => t.id === active.id)
-    const newIndex = tasks.findIndex(t => t.id === over.id)
-
-    onReorder(tasks, oldIndex, newIndex)
-  }}
->
-  <SortableContext
-    items={tasks.map(t => t.id)}
-    strategy={verticalListSortingStrategy}
-  >
-    <div className="flex-1 space-y-2 overflow-auto">
-      {tasks.map(task => (
-        <SortableTask
-          key={task.id}
-          task={task}
-          onToggle={onToggleTask}
-        />
-      ))}
-    </div>
-  </SortableContext>
-</DndContext>
-
-
-      {/* Add task input */}
       <div className="mt-3 flex gap-2">
         <input
-          className="flex-1 rounded-md border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-gray-400"
+          className="flex-1 rounded-md border px-2 py-1 text-sm"
           placeholder="Add task"
           value={input}
           onChange={e => setInput(e.target.value)}
@@ -152,7 +190,7 @@ function Quadrant({ quadrant, tasks, onAddTask, onToggleTask, onReorder })
         />
         <button
           onClick={handleAdd}
-          className="text-sm px-3 py-1 rounded-md border border-gray-300 hover:bg-gray-100"
+          className="px-3 py-1 border rounded-md"
         >
           +
         </button>
@@ -168,7 +206,10 @@ function SortableTask({ task, onToggle }) {
     setNodeRef,
     transform,
     transition,
-  } = useSortable({ id: task.id })
+  } = useSortable({
+    id: task.id,
+    data: { quadrant: task.quadrant },
+  })
 
   const style = {
     transform: CSS.Transform.toString(transform),
@@ -179,32 +220,25 @@ function SortableTask({ task, onToggle }) {
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-2 text-sm bg-white rounded-md px-2 py-1 border border-gray-200"
+      className="flex items-center gap-2 text-sm bg-white rounded-md px-2 py-1 border"
     >
-      {/* Drag handle */}
       <span
         {...attributes}
         {...listeners}
-        className="cursor-grab text-gray-400 px-1"
-        title="Drag"
+        className="cursor-grab text-gray-400"
       >
         ☰
       </span>
 
-      {/* Checkbox */}
       <input
         type="checkbox"
         checked={task.completed}
         onChange={() => onToggle(task.id)}
-        className="cursor-pointer"
       />
 
-      {/* Text */}
       <span
-        className={`flex-1 select-none ${
-          task.completed
-            ? "line-through text-gray-400"
-            : "text-gray-800"
+        className={`flex-1 ${
+          task.completed ? "line-through text-gray-400" : ""
         }`}
       >
         {task.title}
