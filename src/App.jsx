@@ -47,6 +47,10 @@ export default function App() {
     )
   }
 
+  const deleteTask = (id) => {
+  setTasks(prev => prev.filter(t => t.id !== id))
+}
+
   const clearCompleted = () => {
   setTasks(prev => prev.filter(t => !t.completed))
 }
@@ -148,6 +152,7 @@ export default function App() {
               }
               onAddTask={addTask}
               onToggleTask={toggleTask}
+              onDeleteTask={deleteTask}
             />
           ))}
         </div>
@@ -156,7 +161,14 @@ export default function App() {
   )
 }
 
-function Quadrant({ quadrant, tasks, onAddTask, onToggleTask }) {
+function Quadrant({
+  quadrant,
+  tasks,
+  onAddTask,
+  onToggleTask,
+  onDeleteTask,
+}) 
+ {
   const [input, setInput] = useState("")
 
   const { setNodeRef } = useDroppable({
@@ -189,6 +201,7 @@ function Quadrant({ quadrant, tasks, onAddTask, onToggleTask }) {
               key={task.id}
               task={task}
               onToggle={onToggleTask}
+              onDelete={onDeleteTask}
             />
           ))}
         </div>
@@ -213,7 +226,7 @@ function Quadrant({ quadrant, tasks, onAddTask, onToggleTask }) {
   )
 }
 
-function SortableTask({ task, onToggle }) {
+function SortableTask({ task, onToggle, onDelete }) {
   const {
     attributes,
     listeners,
@@ -234,22 +247,27 @@ function SortableTask({ task, onToggle }) {
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-2 text-sm bg-white rounded-md px-2 py-1 border"
+      className="group flex items-center gap-2 text-sm bg-white rounded-md px-2 py-1 border"
     >
+      {/* Drag handle */}
       <span
         {...attributes}
         {...listeners}
         className="cursor-grab text-gray-400"
+        title="Drag"
       >
         ☰
       </span>
 
+      {/* Checkbox */}
       <input
         type="checkbox"
         checked={task.completed}
         onChange={() => onToggle(task.id)}
+        className="cursor-pointer"
       />
 
+      {/* Text */}
       <span
         className={`flex-1 ${
           task.completed ? "line-through text-gray-400" : ""
@@ -257,6 +275,15 @@ function SortableTask({ task, onToggle }) {
       >
         {task.title}
       </span>
+
+      {/* Delete */}
+      <button
+        onClick={() => onDelete(task.id)}
+        className="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 px-1"
+        title="Delete"
+      >
+        ✕
+      </button>
     </div>
   )
 }
