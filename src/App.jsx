@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import {
   DndContext,
   closestCenter,
@@ -14,6 +14,8 @@ import {
 
 import { CSS } from "@dnd-kit/utilities"
 
+const STORAGE_KEY = "eisenhower_tasks_v1"
+
 const QUADRANTS = [
   { id: "UI", title: "Urgent & Important", subtitle: "Do first" },
   { id: "NI", title: "Not Urgent & Important", subtitle: "Schedule" },
@@ -22,7 +24,20 @@ const QUADRANTS = [
 ]
 
 export default function App() {
-  const [tasks, setTasks] = useState([])
+  const [tasks, setTasks] = useState(() => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    return stored ? JSON.parse(stored) : []
+  } catch {
+    return []
+  }
+})
+
+  useEffect(() => {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
+}, [tasks])
+
+
 
   const addTask = (title, quadrant) => {
     if (!title.trim()) return
