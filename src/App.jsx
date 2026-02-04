@@ -196,6 +196,23 @@ export default function App() {
             ))}
           </div>
         </DndContext>
+
+        <footer className="mt-6 flex items-center justify-center gap-3 text-gray-600">
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            className="h-6 w-6"
+            fill="currentColor"
+          >
+            <path d="M12 0.3C5.4 0.3 0 5.7 0 12.3c0 5.3 3.4 9.8 8.2 11.4.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.9 1.3 1.9 1.3 1.1 1.9 3 1.3 3.7 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.6-1.3-5.6-6 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2.9-.3 1.9-.4 2.9-.4 1 0 2 .1 2.9.4 2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.7-2.9 5.7-5.6 6 .4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.6 4.7-1.6 8.1-6.1 8.1-11.4C24 5.7 18.6.3 12 .3z" />
+          </svg>
+          <a
+            href="https://github.com/prateek-mehra"
+            className="text-base font-medium hover:text-gray-900"
+          >
+            prateek-mehra
+          </a>
+        </footer>
       </div>
     </div>
   )
