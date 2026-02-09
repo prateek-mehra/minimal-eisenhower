@@ -20,8 +20,12 @@ import { CSS } from "@dnd-kit/utilities"
 
 const STORAGE_KEY = "eisenhower_tasks_v1"
 const USER_KEY = "eisenhower_google_user_v1"
+const TASKLIST_KEY = "eisenhower_google_tasklist_id_v1"
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
+const TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
+const TASKLIST_TITLE = "Eisenhower Matrix"
+const TASKS_API_BASE = "https://tasks.googleapis.com/tasks/v1"
 
 const QUADRANTS = [
   { id: "UI", title: "Urgent & Important", subtitle: "Do first" },
@@ -55,7 +59,20 @@ export default function App() {
     }
   })
   const googleButtonRef = useRef(null)
+  const tokenClientRef = useRef(null)
+  const tokenRequestRef = useRef(null)
   const [googleReady, setGoogleReady] = useState(false)
+  const [accessToken, setAccessToken] = useState(null)
+  const [tokenExpiry, setTokenExpiry] = useState(0)
+  const [tasklistId, setTasklistId] = useState(() => {
+    try {
+      const stored = localStorage.getItem(TASKLIST_KEY)
+      return stored || null
+    } catch {
+      return null
+    }
+  })
+  const [tasksError, setTasksError] = useState("")
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
@@ -68,6 +85,14 @@ export default function App() {
       localStorage.removeItem(USER_KEY)
     }
   }, [user])
+
+  useEffect(() => {
+    if (tasklistId) {
+      localStorage.setItem(TASKLIST_KEY, tasklistId)
+    } else {
+      localStorage.removeItem(TASKLIST_KEY)
+    }
+  }, [tasklistId])
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID) return
@@ -90,6 +115,32 @@ export default function App() {
           })
         },
       })
+      if (window.google?.accounts?.oauth2) {
+        tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+          client_id: GOOGLE_CLIENT_ID,
+          scope: TASKS_SCOPE,
+          callback: (response) => {
+            if (response?.error) {
+              setTasksError("Google Tasks access denied.")
+              if (tokenRequestRef.current) {
+                tokenRequestRef.current.reject(response.error)
+                tokenRequestRef.current = null
+              }
+              return
+            }
+            if (response?.access_token) {
+              const expiresInMs = (response.expires_in || 0) * 1000
+              setAccessToken(response.access_token)
+              setTokenExpiry(Date.now() + expiresInMs)
+              setTasksError("")
+              if (tokenRequestRef.current) {
+                tokenRequestRef.current.resolve(response.access_token)
+                tokenRequestRef.current = null
+              }
+            }
+          },
+        })
+      }
       renderGoogleButton()
       setGoogleReady(true)
     }
@@ -129,6 +180,184 @@ export default function App() {
     })
   }
 
+  const requestAccessToken = ({ prompt }) => {
+    if (!tokenClientRef.current) return Promise.resolve(null)
+    if (tokenRequestRef.current) {
+      return tokenRequestRef.current.promise
+    }
+
+    let resolve = () => {}
+    let reject = () => {}
+    const promise = new Promise((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    tokenRequestRef.current = { resolve, reject, promise }
+
+    tokenClientRef.current.requestAccessToken({ prompt })
+    return promise
+  }
+
+  const ensureAccessToken = async ({ interactive } = {}) => {
+    const isValid =
+      accessToken && tokenExpiry && Date.now() < tokenExpiry - 60_000
+    if (isValid) return accessToken
+    if (!tokenClientRef.current) return null
+
+    try {
+      return await requestAccessToken({ prompt: interactive ? "consent" : "" })
+    } catch {
+      if (interactive) return null
+      try {
+        return await requestAccessToken({ prompt: "consent" })
+      } catch {
+        return null
+      }
+    }
+  }
+
+  const tasksFetch = async (path, { method = "GET", body, token } = {}) => {
+    const response = await fetch(`${TASKS_API_BASE}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    })
+
+    if (response.status === 204) return null
+    if (!response.ok) {
+      const text = await response.text()
+      throw new Error(text || `Tasks API error: ${response.status}`)
+    }
+    return response.json()
+  }
+
+  const ensureTasklistId = async (token) => {
+    if (tasklistId) return tasklistId
+    const data = await tasksFetch("/users/@me/lists", { token })
+    const existing = data?.items?.find(list => list.title === TASKLIST_TITLE)
+    if (existing?.id) {
+      setTasklistId(existing.id)
+      return existing.id
+    }
+    const created = await tasksFetch("/users/@me/lists", {
+      method: "POST",
+      token,
+      body: { title: TASKLIST_TITLE },
+    })
+    if (created?.id) {
+      setTasklistId(created.id)
+      return created.id
+    }
+    return null
+  }
+
+  const getTasksAccess = async ({ interactive } = {}) => {
+    const token = await ensureAccessToken({ interactive })
+    if (!token) return null
+    try {
+      const listId = await ensureTasklistId(token)
+      if (!listId) return null
+      return { token, listId }
+    } catch {
+      return null
+    }
+  }
+
+  const buildTaskPayload = (task) => ({
+    title: task.title,
+    status: task.completed ? "completed" : "needsAction",
+    notes: `Quadrant: ${task.quadrant}`,
+  })
+
+  const syncCreateTask = async (task) => {
+    const access = await getTasksAccess({ interactive: true })
+    if (!access) return
+
+    try {
+      const created = await tasksFetch(
+        `/lists/${access.listId}/tasks`,
+        {
+          method: "POST",
+          token: access.token,
+          body: buildTaskPayload(task),
+        }
+      )
+      if (created?.id) {
+        setTasks(prev =>
+          prev.map(t =>
+            t.id === task.id ? { ...t, googleTaskId: created.id } : t
+          )
+        )
+        setTasksError("")
+      }
+    } catch {
+      setTasksError("Google Tasks sync failed.")
+    }
+  }
+
+  const syncUpdateTask = async (task) => {
+    if (!task) return
+    if (!task.googleTaskId) {
+      await syncCreateTask(task)
+      return
+    }
+    const access = await getTasksAccess({ interactive: false })
+    if (!access) return
+
+    try {
+      await tasksFetch(
+        `/lists/${access.listId}/tasks/${task.googleTaskId}`,
+        {
+          method: "PUT",
+          token: access.token,
+          body: buildTaskPayload(task),
+        }
+      )
+      setTasksError("")
+    } catch {
+      setTasksError("Google Tasks sync failed.")
+    }
+  }
+
+  const syncDeleteTask = async (task) => {
+    if (!task?.googleTaskId) return
+    const access = await getTasksAccess({ interactive: false })
+    if (!access) return
+    try {
+      await tasksFetch(
+        `/lists/${access.listId}/tasks/${task.googleTaskId}`,
+        { method: "DELETE", token: access.token }
+      )
+      setTasksError("")
+    } catch {
+      setTasksError("Google Tasks sync failed.")
+    }
+  }
+
+  const syncClearCompleted = async (completedTasks) => {
+    if (!completedTasks.length) return
+    const access = await getTasksAccess({ interactive: false })
+    if (!access) return
+    try {
+      await Promise.all(
+        completedTasks.map(task =>
+          task.googleTaskId
+            ? tasksFetch(
+                `/lists/${access.listId}/tasks/${task.googleTaskId}`,
+                { method: "DELETE", token: access.token }
+              )
+            : Promise.resolve()
+        )
+      )
+      setTasksError("")
+    } catch {
+      setTasksError("Google Tasks sync failed.")
+    }
+  }
+
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: { distance: 6 },
@@ -141,32 +370,49 @@ export default function App() {
   const addTask = (title, quadrant) => {
     if (!title.trim()) return
 
-    setTasks(prev => [
-      ...prev,
-      {
+    let createdTask = null
+    setTasks(prev => {
+      const newTask = {
         id: generateId(),
         title,
         quadrant,
         completed: false,
         order: prev.filter(t => t.quadrant === quadrant).length,
-      },
-    ])
+      }
+      createdTask = newTask
+      return [...prev, newTask]
+    })
+    if (createdTask) {
+      syncCreateTask(createdTask)
+    }
   }
 
   const toggleTask = (id) => {
+    let updatedTask = null
     setTasks(prev =>
-      prev.map(t =>
-        t.id === id ? { ...t, completed: !t.completed } : t
-      )
+      prev.map(t => {
+        if (t.id !== id) return t
+        updatedTask = { ...t, completed: !t.completed }
+        return updatedTask
+      })
     )
+    if (updatedTask) {
+      syncUpdateTask(updatedTask)
+    }
   }
 
   const deleteTask = (id) => {
+    const target = tasks.find(t => t.id === id)
     setTasks(prev => prev.filter(t => t.id !== id))
+    if (target) {
+      syncDeleteTask(target)
+    }
   }
 
   const clearCompleted = () => {
+    const completed = tasks.filter(t => t.completed)
     setTasks(prev => prev.filter(t => !t.completed))
+    syncClearCompleted(completed)
   }
 
   const reorderTasks = (quadrantTasks, from, to) => {
@@ -208,6 +454,7 @@ export default function App() {
       return
     }
 
+    let movedTask = null
     setTasks(prev => {
       const sourceTasks = prev
         .filter(t => t.quadrant === sourceQuadrant && t.id !== active.id)
@@ -218,7 +465,7 @@ export default function App() {
         .filter(t => t.quadrant === targetQuadrant)
         .sort((a, b) => a.order - b.order)
 
-      const movedTask = {
+      movedTask = {
         ...activeTask,
         quadrant: targetQuadrant,
         order: targetTasks.length,
@@ -233,6 +480,9 @@ export default function App() {
         movedTask,
       ]
     })
+    if (movedTask) {
+      syncUpdateTask(movedTask)
+    }
   }
 
   if (!user) {
@@ -265,7 +515,13 @@ export default function App() {
                 <span className="hidden sm:inline">{user.name}</span>
                 <button
                   onClick={() => {
+                    if (accessToken && window.google?.accounts?.oauth2?.revoke) {
+                      window.google.accounts.oauth2.revoke(accessToken, () => {})
+                    }
                     setUser(null)
+                    setAccessToken(null)
+                    setTokenExpiry(0)
+                    setTasklistId(null)
                     if (window.google?.accounts?.id) {
                       window.google.accounts.id.disableAutoSelect()
                     }
@@ -276,6 +532,21 @@ export default function App() {
                 </button>
               </div>
 
+              {!accessToken ? (
+                <button
+                  onClick={() => {
+                    getTasksAccess({ interactive: true })
+                  }}
+                  className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
+                >
+                  Connect Google Tasks
+                </button>
+              ) : (
+                <span className="text-[11px] text-gray-500 sm:text-xs">
+                  Google Tasks connected
+                </span>
+              )}
+
               <button
                 onClick={clearCompleted}
                 className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
@@ -284,6 +555,9 @@ export default function App() {
               </button>
             </div>
           </div>
+          {tasksError && (
+            <p className="mt-1 text-xs text-red-500">{tasksError}</p>
+          )}
           <p className="mt-1 text-xs text-gray-500 sm:text-sm">
             Tap and hold to drag, or scroll each quadrant to view more tasks.
           </p>
