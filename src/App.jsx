@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useRef } from "react"
 import {
   DndContext,
   closestCenter,
@@ -19,6 +19,9 @@ import {
 import { CSS } from "@dnd-kit/utilities"
 
 const STORAGE_KEY = "eisenhower_tasks_v1"
+const USER_KEY = "eisenhower_google_user_v1"
+
+const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 
 const QUADRANTS = [
   { id: "UI", title: "Urgent & Important", subtitle: "Do first" },
@@ -43,10 +46,88 @@ export default function App() {
       return []
     }
   })
+  const [user, setUser] = useState(() => {
+    try {
+      const stored = localStorage.getItem(USER_KEY)
+      return stored ? JSON.parse(stored) : null
+    } catch {
+      return null
+    }
+  })
+  const googleButtonRef = useRef(null)
+  const [googleReady, setGoogleReady] = useState(false)
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
   }, [tasks])
+
+  useEffect(() => {
+    if (user) {
+      localStorage.setItem(USER_KEY, JSON.stringify(user))
+    } else {
+      localStorage.removeItem(USER_KEY)
+    }
+  }, [user])
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return
+    if (typeof window === "undefined") return
+
+    const existing = document.querySelector(
+      'script[src="https://accounts.google.com/gsi/client"]'
+    )
+
+    const load = () => {
+      if (!window.google?.accounts?.id) return
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: (response) => {
+          const profile = decodeJwt(response.credential)
+          setUser({
+            name: profile.name,
+            email: profile.email,
+            picture: profile.picture,
+          })
+        },
+      })
+      renderGoogleButton()
+      setGoogleReady(true)
+    }
+
+    if (existing) {
+      if (window.google?.accounts?.id) {
+        load()
+      } else {
+        existing.addEventListener("load", load, { once: true })
+      }
+      return
+    }
+
+    const script = document.createElement("script")
+    script.src = "https://accounts.google.com/gsi/client"
+    script.async = true
+    script.defer = true
+    script.onload = load
+    document.head.appendChild(script)
+  }, [])
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return
+    if (!googleReady) return
+    renderGoogleButton()
+  }, [googleReady, user])
+
+  const renderGoogleButton = () => {
+    if (!window.google?.accounts?.id) return
+    if (!googleButtonRef.current) return
+    googleButtonRef.current.innerHTML = ""
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      theme: "outline",
+      size: "large",
+      text: "continue_with",
+      width: 260,
+    })
+  }
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -154,6 +235,16 @@ export default function App() {
     })
   }
 
+  if (!user) {
+    return (
+      <SignInScreen
+        googleButtonRef={googleButtonRef}
+        googleReady={googleReady}
+        hasClientId={!!GOOGLE_CLIENT_ID}
+      />
+    )
+  }
+
   return (
     <div className="min-h-[100dvh] bg-gray-50 px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6">
       <div className="mx-auto w-full max-w-5xl">
@@ -163,12 +254,35 @@ export default function App() {
               Eisenhower Matrix
             </h1>
 
-            <button
-              onClick={clearCompleted}
-              className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
-            >
-              Clear completed
-            </button>
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-2 py-1 text-xs sm:text-sm">
+                <img
+                  src={user.picture}
+                  alt={`${user.name} avatar`}
+                  className="h-6 w-6 rounded-full"
+                  referrerPolicy="no-referrer"
+                />
+                <span className="hidden sm:inline">{user.name}</span>
+                <button
+                  onClick={() => {
+                    setUser(null)
+                    if (window.google?.accounts?.id) {
+                      window.google.accounts.id.disableAutoSelect()
+                    }
+                  }}
+                  className="rounded-full px-2 py-1 text-xs text-gray-600 hover:text-gray-900"
+                >
+                  Sign out
+                </button>
+              </div>
+
+              <button
+                onClick={clearCompleted}
+                className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
+              >
+                Clear completed
+              </button>
+            </div>
           </div>
           <p className="mt-1 text-xs text-gray-500 sm:text-sm">
             Tap and hold to drag, or scroll each quadrant to view more tasks.
@@ -216,6 +330,47 @@ export default function App() {
       </div>
     </div>
   )
+}
+
+function SignInScreen({ googleButtonRef, googleReady, hasClientId }) {
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6">
+      <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 rounded-2xl border border-gray-200 bg-white px-6 py-10 text-center shadow-sm">
+        <h1 className="text-2xl font-semibold">Eisenhower Matrix</h1>
+        <p className="text-sm text-gray-500">
+          Sign in with Google to access your tasks.
+        </p>
+
+        <div className="mt-2 flex flex-col items-center gap-2">
+          <div ref={googleButtonRef} />
+          {!hasClientId && (
+            <span className="text-[11px] text-gray-500">
+              Set `VITE_GOOGLE_CLIENT_ID`
+            </span>
+          )}
+          {hasClientId && !googleReady && (
+            <span className="text-[11px] text-gray-500">
+              Loading Google sign-in...
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function decodeJwt(token) {
+  try {
+    const payload = token.split(".")[1]
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/")
+    const padded = base64.padEnd(
+      base64.length + ((4 - (base64.length % 4)) % 4),
+      "="
+    )
+    return JSON.parse(atob(padded))
+  } catch {
+    return {}
+  }
 }
 
 function Quadrant({
