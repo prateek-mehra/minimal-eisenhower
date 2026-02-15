@@ -396,73 +396,55 @@ export default function App() {
     }
   }, [ensureAccessToken, writeRemoteTasks])
 
-  useEffect(() => {
-    if (!GOOGLE_CLIENT_ID) return
-    if (!googleReady) return
-    renderGoogleButton()
-  }, [googleReady, user, renderGoogleButton])
-
-  useEffect(() => {
+  const syncFromCloud = useCallback(async ({ interactive } = {}) => {
     if (!userEmail || !googleReady || !hasClientId) return
 
-    let cancelled = false
-    const initialize = async () => {
-      setSyncError("")
-      setSyncStatus("syncing")
+    setSyncError("")
+    setSyncStatus("syncing")
 
-      const token = await ensureAccessToken({ interactive: false })
-      if (!token || cancelled) {
-        if (!cancelled) {
-          setSyncStatus("error")
-          setSyncError("Cloud sync authorization was not granted.")
-        }
-        return
+    const token = await ensureAccessToken({ interactive: Boolean(interactive) })
+    if (!token) {
+      setSyncStatus("idle")
+      if (interactive) {
+        setSyncError("Cloud sync authorization was not granted.")
       }
-
-      try {
-        const remote = await readRemoteTasks(token)
-        if (cancelled) return
-
-        const key = getUserTasksStorageKey(userEmail)
-        const localStored = localStorage.getItem(key)
-        const local = normalizeTasks(localStored ? JSON.parse(localStored) : [])
-        const localSig = toSignature(local)
-        const remoteSig = toSignature(remote.tasks)
-
-        if (remote.exists) {
-          if (remoteSig !== localSig) {
-            if (getLatestUpdate(remote.tasks) >= getLatestUpdate(local)) {
-              setTasks(remote.tasks)
-              lastSyncedSignatureRef.current = remoteSig
-            } else {
-              await writeRemoteTasks(token, local)
-              lastSyncedSignatureRef.current = localSig
-            }
-          } else {
-            lastSyncedSignatureRef.current = localSig
-          }
-        } else if (local.length > 0) {
-          await writeRemoteTasks(token, local)
-          lastSyncedSignatureRef.current = localSig
-        } else {
-          lastSyncedSignatureRef.current = toSignature([])
-        }
-
-        syncInitializedRef.current = true
-        setSyncStatus("ready")
-        setSyncError("")
-      } catch {
-        if (!cancelled) {
-          setSyncStatus("error")
-          setSyncError("Unable to sync tasks from cloud.")
-        }
-      }
+      return
     }
 
-    initialize()
+    try {
+      const remote = await readRemoteTasks(token)
 
-    return () => {
-      cancelled = true
+      const key = getUserTasksStorageKey(userEmail)
+      const localStored = localStorage.getItem(key)
+      const local = normalizeTasks(localStored ? JSON.parse(localStored) : [])
+      const localSig = toSignature(local)
+      const remoteSig = toSignature(remote.tasks)
+
+      if (remote.exists) {
+        if (remoteSig !== localSig) {
+          if (getLatestUpdate(remote.tasks) >= getLatestUpdate(local)) {
+            setTasks(remote.tasks)
+            lastSyncedSignatureRef.current = remoteSig
+          } else {
+            await writeRemoteTasks(token, local)
+            lastSyncedSignatureRef.current = localSig
+          }
+        } else {
+          lastSyncedSignatureRef.current = localSig
+        }
+      } else if (local.length > 0) {
+        await writeRemoteTasks(token, local)
+        lastSyncedSignatureRef.current = localSig
+      } else {
+        lastSyncedSignatureRef.current = toSignature([])
+      }
+
+      syncInitializedRef.current = true
+      setSyncStatus("ready")
+      setSyncError("")
+    } catch {
+      setSyncStatus("error")
+      setSyncError("Unable to sync tasks from cloud.")
     }
   }, [
     userEmail,
@@ -472,6 +454,17 @@ export default function App() {
     readRemoteTasks,
     writeRemoteTasks,
   ])
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return
+    if (!googleReady) return
+    renderGoogleButton()
+  }, [googleReady, user, renderGoogleButton])
+
+  useEffect(() => {
+    if (!userEmail || !googleReady || !hasClientId) return
+    syncFromCloud({ interactive: false })
+  }, [userEmail, googleReady, hasClientId, syncFromCloud])
 
   useEffect(() => {
     if (!syncInitializedRef.current || !userEmail || !hasClientId) return
@@ -658,6 +651,15 @@ export default function App() {
                     ? "Synced"
                     : "Local only"}
               </span>
+
+              {syncStatus !== "ready" && (
+                <button
+                  onClick={() => syncFromCloud({ interactive: true })}
+                  className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
+                >
+                  Enable cloud sync
+                </button>
+              )}
 
               <button
                 onClick={clearCompleted}
