@@ -415,7 +415,7 @@ export default function App() {
       setSyncError("")
       setSyncStatus("syncing")
 
-      const token = await ensureAccessToken({ interactive: true })
+      const token = await ensureAccessToken({ interactive: false })
       if (!token || cancelled) {
         if (!cancelled) {
           setSyncStatus("error")
