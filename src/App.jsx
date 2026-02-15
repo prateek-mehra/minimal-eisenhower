@@ -263,14 +263,9 @@ export default function App() {
     if (!tokenClientRef.current) return null
 
     try {
-      return await requestAccessToken({ prompt: interactive ? "consent" : "" })
+      return await requestAccessToken({ prompt: interactive ? "consent" : "none" })
     } catch {
-      if (interactive) return null
-      try {
-        return await requestAccessToken({ prompt: "consent" })
-      } catch {
-        return null
-      }
+      return null
     }
   }, [accessToken, tokenExpiry, requestAccessToken])
 
