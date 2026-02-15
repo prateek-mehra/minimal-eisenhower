@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo, useCallback } from "react"
 import {
   DndContext,
   closestCenter,
@@ -18,14 +18,14 @@ import {
 
 import { CSS } from "@dnd-kit/utilities"
 
-const STORAGE_KEY = "eisenhower_tasks_v1"
 const USER_KEY = "eisenhower_google_user_v1"
-const TASKLIST_KEY = "eisenhower_google_tasklist_id_v1"
+const TASKS_STORAGE_PREFIX = "eisenhower_tasks_v2"
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
-const TASKS_SCOPE = "https://www.googleapis.com/auth/tasks"
-const TASKLIST_TITLE = "Eisenhower Matrix"
-const TASKS_API_BASE = "https://tasks.googleapis.com/tasks/v1"
+const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
+const DRIVE_FILES_API = "https://www.googleapis.com/drive/v3/files"
+const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files"
+const SYNC_FILE_NAME = "eisenhower-tasks.json"
 
 const QUADRANTS = [
   { id: "UI", title: "Urgent & Important", subtitle: "Do first" },
@@ -34,6 +34,8 @@ const QUADRANTS = [
   { id: "NN", title: "Not Urgent & Not Important", subtitle: "Eliminate" },
 ]
 
+const VALID_QUADRANTS = new Set(QUADRANTS.map(q => q.id))
+
 const generateId = () => {
   if (typeof crypto !== "undefined" && crypto.randomUUID) {
     return crypto.randomUUID()
@@ -41,15 +43,44 @@ const generateId = () => {
   return `task_${Date.now()}_${Math.random().toString(16).slice(2)}`
 }
 
+const getUserTasksStorageKey = (email) =>
+  `${TASKS_STORAGE_PREFIX}:${(email || "").toLowerCase()}`
+
+const normalizeTask = (task, fallbackOrder = 0) => {
+  const safeQuadrant = VALID_QUADRANTS.has(task?.quadrant) ? task.quadrant : "UI"
+  return {
+    id: task?.id || generateId(),
+    title: typeof task?.title === "string" ? task.title : "",
+    quadrant: safeQuadrant,
+    completed: Boolean(task?.completed),
+    order: Number.isFinite(task?.order) ? task.order : fallbackOrder,
+    updatedAt: Number.isFinite(task?.updatedAt) ? task.updatedAt : 0,
+  }
+}
+
+const normalizeTasks = (rawTasks) => {
+  if (!Array.isArray(rawTasks)) return []
+  return rawTasks.map((task, index) => normalizeTask(task, index))
+}
+
+const getLatestUpdate = (taskList) => {
+  if (!taskList.length) return 0
+  return taskList.reduce((max, task) => Math.max(max, task.updatedAt || 0), 0)
+}
+
+const toSignature = (taskList) =>
+  JSON.stringify(
+    [...taskList]
+      .map(task => normalizeTask(task))
+      .sort((a, b) => {
+        if (a.quadrant !== b.quadrant) return a.quadrant.localeCompare(b.quadrant)
+        if (a.order !== b.order) return a.order - b.order
+        return a.id.localeCompare(b.id)
+      })
+  )
+
 export default function App() {
-  const [tasks, setTasks] = useState(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY)
-      return stored ? JSON.parse(stored) : []
-    } catch {
-      return []
-    }
-  })
+  const [tasks, setTasks] = useState([])
   const [user, setUser] = useState(() => {
     try {
       const stored = localStorage.getItem(USER_KEY)
@@ -58,25 +89,34 @@ export default function App() {
       return null
     }
   })
+
   const googleButtonRef = useRef(null)
   const tokenClientRef = useRef(null)
   const tokenRequestRef = useRef(null)
+  const syncTimerRef = useRef(null)
+  const fileIdRef = useRef(null)
+  const syncingRef = useRef(false)
+  const syncInitializedRef = useRef(false)
+  const lastSyncedSignatureRef = useRef(toSignature([]))
+
   const [googleReady, setGoogleReady] = useState(false)
   const [accessToken, setAccessToken] = useState(null)
   const [tokenExpiry, setTokenExpiry] = useState(0)
-  const [tasklistId, setTasklistId] = useState(() => {
-    try {
-      const stored = localStorage.getItem(TASKLIST_KEY)
-      return stored || null
-    } catch {
-      return null
-    }
-  })
-  const [tasksError, setTasksError] = useState("")
+  const [syncStatus, setSyncStatus] = useState("idle")
+  const [syncError, setSyncError] = useState("")
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(tasks))
-  }, [tasks])
+  const userEmail = user?.email || ""
+  const hasClientId = Boolean(GOOGLE_CLIENT_ID)
+
+  const sortedTasks = useMemo(
+    () =>
+      [...tasks].sort((a, b) => {
+        if (a.quadrant !== b.quadrant) return a.quadrant.localeCompare(b.quadrant)
+        if (a.order !== b.order) return a.order - b.order
+        return a.id.localeCompare(b.id)
+      }),
+    [tasks]
+  )
 
   useEffect(() => {
     if (user) {
@@ -87,12 +127,47 @@ export default function App() {
   }, [user])
 
   useEffect(() => {
-    if (tasklistId) {
-      localStorage.setItem(TASKLIST_KEY, tasklistId)
-    } else {
-      localStorage.removeItem(TASKLIST_KEY)
+    if (!userEmail) {
+      setTasks([])
+      lastSyncedSignatureRef.current = toSignature([])
+      syncInitializedRef.current = false
+      fileIdRef.current = null
+      return
     }
-  }, [tasklistId])
+
+    try {
+      const key = getUserTasksStorageKey(userEmail)
+      const stored = localStorage.getItem(key)
+      const parsed = stored ? JSON.parse(stored) : []
+      const normalized = normalizeTasks(parsed)
+      setTasks(normalized)
+      lastSyncedSignatureRef.current = toSignature(normalized)
+    } catch {
+      setTasks([])
+      lastSyncedSignatureRef.current = toSignature([])
+    }
+
+    syncInitializedRef.current = false
+    fileIdRef.current = null
+  }, [userEmail])
+
+  useEffect(() => {
+    if (!userEmail) return
+    const key = getUserTasksStorageKey(userEmail)
+    localStorage.setItem(key, JSON.stringify(tasks))
+  }, [tasks, userEmail])
+
+  const renderGoogleButton = useCallback(() => {
+    if (!window.google?.accounts?.id) return
+    if (!googleButtonRef.current) return
+    googleButtonRef.current.innerHTML = ""
+    window.google.accounts.id.renderButton(googleButtonRef.current, {
+      theme: "outline",
+      size: "large",
+      text: "continue_with",
+      width: 260,
+    })
+  }, [])
 
   useEffect(() => {
     if (!GOOGLE_CLIENT_ID) return
@@ -104,6 +179,7 @@ export default function App() {
 
     const load = () => {
       if (!window.google?.accounts?.id) return
+
       window.google.accounts.id.initialize({
         client_id: GOOGLE_CLIENT_ID,
         callback: (response) => {
@@ -115,24 +191,24 @@ export default function App() {
           })
         },
       })
+
       if (window.google?.accounts?.oauth2) {
         tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
           client_id: GOOGLE_CLIENT_ID,
-          scope: TASKS_SCOPE,
+          scope: DRIVE_SCOPE,
           callback: (response) => {
             if (response?.error) {
-              setTasksError("Google Tasks access denied.")
               if (tokenRequestRef.current) {
-                tokenRequestRef.current.reject(response.error)
+                tokenRequestRef.current.reject(new Error(response.error))
                 tokenRequestRef.current = null
               }
               return
             }
+
             if (response?.access_token) {
               const expiresInMs = (response.expires_in || 0) * 1000
               setAccessToken(response.access_token)
               setTokenExpiry(Date.now() + expiresInMs)
-              setTasksError("")
               if (tokenRequestRef.current) {
                 tokenRequestRef.current.resolve(response.access_token)
                 tokenRequestRef.current = null
@@ -141,6 +217,7 @@ export default function App() {
           },
         })
       }
+
       renderGoogleButton()
       setGoogleReady(true)
     }
@@ -160,31 +237,11 @@ export default function App() {
     script.defer = true
     script.onload = load
     document.head.appendChild(script)
-  }, [])
+  }, [renderGoogleButton])
 
-  useEffect(() => {
-    if (!GOOGLE_CLIENT_ID) return
-    if (!googleReady) return
-    renderGoogleButton()
-  }, [googleReady, user])
-
-  const renderGoogleButton = () => {
-    if (!window.google?.accounts?.id) return
-    if (!googleButtonRef.current) return
-    googleButtonRef.current.innerHTML = ""
-    window.google.accounts.id.renderButton(googleButtonRef.current, {
-      theme: "outline",
-      size: "large",
-      text: "continue_with",
-      width: 260,
-    })
-  }
-
-  const requestAccessToken = ({ prompt }) => {
+  const requestAccessToken = useCallback(({ prompt }) => {
     if (!tokenClientRef.current) return Promise.resolve(null)
-    if (tokenRequestRef.current) {
-      return tokenRequestRef.current.promise
-    }
+    if (tokenRequestRef.current) return tokenRequestRef.current.promise
 
     let resolve = () => {}
     let reject = () => {}
@@ -192,13 +249,14 @@ export default function App() {
       resolve = res
       reject = rej
     })
+
     tokenRequestRef.current = { resolve, reject, promise }
-
     tokenClientRef.current.requestAccessToken({ prompt })
-    return promise
-  }
 
-  const ensureAccessToken = async ({ interactive } = {}) => {
+    return promise
+  }, [])
+
+  const ensureAccessToken = useCallback(async ({ interactive } = {}) => {
     const isValid =
       accessToken && tokenExpiry && Date.now() < tokenExpiry - 60_000
     if (isValid) return accessToken
@@ -214,149 +272,232 @@ export default function App() {
         return null
       }
     }
-  }
+  }, [accessToken, tokenExpiry, requestAccessToken])
 
-  const tasksFetch = async (path, { method = "GET", body, token } = {}) => {
-    const response = await fetch(`${TASKS_API_BASE}${path}`, {
+  const driveFetch = useCallback(async (url, { method = "GET", token, body, headers } = {}) => {
+    const response = await fetch(url, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+        ...(headers || {}),
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body,
     })
 
     if (response.status === 204) return null
     if (!response.ok) {
       const text = await response.text()
-      throw new Error(text || `Tasks API error: ${response.status}`)
+      throw new Error(text || `Drive API error: ${response.status}`)
     }
-    return response.json()
-  }
 
-  const ensureTasklistId = async (token) => {
-    if (tasklistId) return tasklistId
-    const data = await tasksFetch("/users/@me/lists", { token })
-    const existing = data?.items?.find(list => list.title === TASKLIST_TITLE)
-    if (existing?.id) {
-      setTasklistId(existing.id)
-      return existing.id
+    const contentType = response.headers.get("content-type") || ""
+    if (contentType.includes("application/json")) {
+      return response.json()
     }
-    const created = await tasksFetch("/users/@me/lists", {
-      method: "POST",
-      token,
-      body: { title: TASKLIST_TITLE },
-    })
-    if (created?.id) {
-      setTasklistId(created.id)
-      return created.id
+    return response.text()
+  }, [])
+
+  const findRemoteFileId = useCallback(async (token) => {
+    if (fileIdRef.current) return fileIdRef.current
+
+    const query = encodeURIComponent(
+      `name='${SYNC_FILE_NAME}' and 'appDataFolder' in parents and trashed=false`
+    )
+    const url = `${DRIVE_FILES_API}?spaces=appDataFolder&fields=files(id)&pageSize=1&q=${query}`
+    const data = await driveFetch(url, { token })
+    const id = data?.files?.[0]?.id || null
+    fileIdRef.current = id
+    return id
+  }, [driveFetch])
+
+  const readRemoteTasks = useCallback(async (token) => {
+    const id = await findRemoteFileId(token)
+    if (!id) return { exists: false, tasks: [] }
+
+    const data = await driveFetch(`${DRIVE_FILES_API}/${id}?alt=media`, { token })
+    return {
+      exists: true,
+      tasks: normalizeTasks(data?.tasks),
     }
-    return null
-  }
+  }, [findRemoteFileId, driveFetch])
 
-  const getTasksAccess = async ({ interactive } = {}) => {
-    const token = await ensureAccessToken({ interactive })
-    if (!token) return null
-    try {
-      const listId = await ensureTasklistId(token)
-      if (!listId) return null
-      return { token, listId }
-    } catch {
-      return null
+  const writeRemoteTasks = useCallback(async (token, taskList) => {
+    const payload = {
+      version: 1,
+      updatedAt: Date.now(),
+      tasks: normalizeTasks(taskList),
     }
-  }
 
-  const buildTaskPayload = (task) => ({
-    title: task.title,
-    status: task.completed ? "completed" : "needsAction",
-    notes: `Quadrant: ${task.quadrant}`,
-  })
+    const existingId = await findRemoteFileId(token)
 
-  const syncCreateTask = async (task) => {
-    const access = await getTasksAccess({ interactive: true })
-    if (!access) return
-
-    try {
-      const created = await tasksFetch(
-        `/lists/${access.listId}/tasks`,
-        {
-          method: "POST",
-          token: access.token,
-          body: buildTaskPayload(task),
-        }
-      )
-      if (created?.id) {
-        setTasks(prev =>
-          prev.map(t =>
-            t.id === task.id ? { ...t, googleTaskId: created.id } : t
-          )
-        )
-        setTasksError("")
-      }
-    } catch {
-      setTasksError("Google Tasks sync failed.")
-    }
-  }
-
-  const syncUpdateTask = async (task) => {
-    if (!task) return
-    if (!task.googleTaskId) {
-      await syncCreateTask(task)
+    if (existingId) {
+      await driveFetch(`${DRIVE_UPLOAD_API}/${existingId}?uploadType=media`, {
+        method: "PATCH",
+        token,
+        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+        },
+      })
       return
     }
-    const access = await getTasksAccess({ interactive: false })
-    if (!access) return
+
+    const boundary = `batch_${Math.random().toString(16).slice(2)}`
+    const metadata = {
+      name: SYNC_FILE_NAME,
+      parents: ["appDataFolder"],
+      mimeType: "application/json",
+    }
+
+    const body = [
+      `--${boundary}`,
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify(metadata),
+      `--${boundary}`,
+      "Content-Type: application/json; charset=UTF-8",
+      "",
+      JSON.stringify(payload),
+      `--${boundary}--`,
+      "",
+    ].join("\r\n")
+
+    const created = await driveFetch(
+      `${DRIVE_UPLOAD_API}?uploadType=multipart&fields=id`,
+      {
+        method: "POST",
+        token,
+        body,
+        headers: {
+          "Content-Type": `multipart/related; boundary=${boundary}`,
+        },
+      }
+    )
+
+    if (created?.id) {
+      fileIdRef.current = created.id
+    }
+  }, [findRemoteFileId, driveFetch])
+
+  const pushTasksToCloud = useCallback(async (nextTasks) => {
+    if (syncingRef.current) return
+
+    syncingRef.current = true
+    setSyncStatus("syncing")
+    setSyncError("")
 
     try {
-      await tasksFetch(
-        `/lists/${access.listId}/tasks/${task.googleTaskId}`,
-        {
-          method: "PUT",
-          token: access.token,
-          body: buildTaskPayload(task),
+      const token = await ensureAccessToken({ interactive: false })
+      if (!token) throw new Error("No token")
+
+      await writeRemoteTasks(token, nextTasks)
+      lastSyncedSignatureRef.current = toSignature(nextTasks)
+      setSyncStatus("ready")
+    } catch {
+      setSyncStatus("error")
+      setSyncError("Changes saved locally. Cloud sync will retry.")
+    } finally {
+      syncingRef.current = false
+    }
+  }, [ensureAccessToken, writeRemoteTasks])
+
+  useEffect(() => {
+    if (!GOOGLE_CLIENT_ID) return
+    if (!googleReady) return
+    renderGoogleButton()
+  }, [googleReady, user, renderGoogleButton])
+
+  useEffect(() => {
+    if (!userEmail || !googleReady || !hasClientId) return
+
+    let cancelled = false
+    const initialize = async () => {
+      setSyncError("")
+      setSyncStatus("syncing")
+
+      const token = await ensureAccessToken({ interactive: true })
+      if (!token || cancelled) {
+        if (!cancelled) {
+          setSyncStatus("error")
+          setSyncError("Cloud sync authorization was not granted.")
         }
-      )
-      setTasksError("")
-    } catch {
-      setTasksError("Google Tasks sync failed.")
-    }
-  }
+        return
+      }
 
-  const syncDeleteTask = async (task) => {
-    if (!task?.googleTaskId) return
-    const access = await getTasksAccess({ interactive: false })
-    if (!access) return
-    try {
-      await tasksFetch(
-        `/lists/${access.listId}/tasks/${task.googleTaskId}`,
-        { method: "DELETE", token: access.token }
-      )
-      setTasksError("")
-    } catch {
-      setTasksError("Google Tasks sync failed.")
-    }
-  }
+      try {
+        const remote = await readRemoteTasks(token)
+        if (cancelled) return
 
-  const syncClearCompleted = async (completedTasks) => {
-    if (!completedTasks.length) return
-    const access = await getTasksAccess({ interactive: false })
-    if (!access) return
-    try {
-      await Promise.all(
-        completedTasks.map(task =>
-          task.googleTaskId
-            ? tasksFetch(
-                `/lists/${access.listId}/tasks/${task.googleTaskId}`,
-                { method: "DELETE", token: access.token }
-              )
-            : Promise.resolve()
-        )
-      )
-      setTasksError("")
-    } catch {
-      setTasksError("Google Tasks sync failed.")
+        const key = getUserTasksStorageKey(userEmail)
+        const localStored = localStorage.getItem(key)
+        const local = normalizeTasks(localStored ? JSON.parse(localStored) : [])
+        const localSig = toSignature(local)
+        const remoteSig = toSignature(remote.tasks)
+
+        if (remote.exists) {
+          if (remoteSig !== localSig) {
+            if (getLatestUpdate(remote.tasks) >= getLatestUpdate(local)) {
+              setTasks(remote.tasks)
+              lastSyncedSignatureRef.current = remoteSig
+            } else {
+              await writeRemoteTasks(token, local)
+              lastSyncedSignatureRef.current = localSig
+            }
+          } else {
+            lastSyncedSignatureRef.current = localSig
+          }
+        } else if (local.length > 0) {
+          await writeRemoteTasks(token, local)
+          lastSyncedSignatureRef.current = localSig
+        } else {
+          lastSyncedSignatureRef.current = toSignature([])
+        }
+
+        syncInitializedRef.current = true
+        setSyncStatus("ready")
+        setSyncError("")
+      } catch {
+        if (!cancelled) {
+          setSyncStatus("error")
+          setSyncError("Unable to sync tasks from cloud.")
+        }
+      }
     }
-  }
+
+    initialize()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    userEmail,
+    googleReady,
+    hasClientId,
+    ensureAccessToken,
+    readRemoteTasks,
+    writeRemoteTasks,
+  ])
+
+  useEffect(() => {
+    if (!syncInitializedRef.current || !userEmail || !hasClientId) return
+
+    const currentSignature = toSignature(tasks)
+    if (currentSignature === lastSyncedSignatureRef.current) return
+
+    if (syncTimerRef.current) {
+      clearTimeout(syncTimerRef.current)
+    }
+
+    syncTimerRef.current = setTimeout(() => {
+      pushTasksToCloud(tasks)
+    }, 700)
+
+    return () => {
+      if (syncTimerRef.current) {
+        clearTimeout(syncTimerRef.current)
+      }
+    }
+  }, [tasks, userEmail, hasClientId, pushTasksToCloud])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -370,57 +511,44 @@ export default function App() {
   const addTask = (title, quadrant) => {
     if (!title.trim()) return
 
-    let createdTask = null
     setTasks(prev => {
+      const now = Date.now()
       const newTask = {
         id: generateId(),
         title,
         quadrant,
         completed: false,
         order: prev.filter(t => t.quadrant === quadrant).length,
+        updatedAt: now,
       }
-      createdTask = newTask
       return [...prev, newTask]
     })
-    if (createdTask) {
-      syncCreateTask(createdTask)
-    }
   }
 
   const toggleTask = (id) => {
-    let updatedTask = null
     setTasks(prev =>
-      prev.map(t => {
-        if (t.id !== id) return t
-        updatedTask = { ...t, completed: !t.completed }
-        return updatedTask
-      })
+      prev.map(t =>
+        t.id === id ? { ...t, completed: !t.completed, updatedAt: Date.now() } : t
+      )
     )
-    if (updatedTask) {
-      syncUpdateTask(updatedTask)
-    }
   }
 
   const deleteTask = (id) => {
-    const target = tasks.find(t => t.id === id)
     setTasks(prev => prev.filter(t => t.id !== id))
-    if (target) {
-      syncDeleteTask(target)
-    }
   }
 
   const clearCompleted = () => {
-    const completed = tasks.filter(t => t.completed)
     setTasks(prev => prev.filter(t => !t.completed))
-    syncClearCompleted(completed)
   }
 
   const reorderTasks = (quadrantTasks, from, to) => {
     const reordered = arrayMove(quadrantTasks, from, to)
 
+    const now = Date.now()
     const updated = reordered.map((task, index) => ({
       ...task,
       order: index,
+      updatedAt: now,
     }))
 
     setTasks(prev => {
@@ -437,8 +565,7 @@ export default function App() {
     if (!activeTask) return
 
     const sourceQuadrant = activeTask.quadrant
-    const targetQuadrant =
-      over.data?.current?.quadrant ?? sourceQuadrant
+    const targetQuadrant = over.data?.current?.quadrant ?? sourceQuadrant
 
     if (sourceQuadrant === targetQuadrant) {
       const quadrantTasks = tasks
@@ -454,21 +581,21 @@ export default function App() {
       return
     }
 
-    let movedTask = null
     setTasks(prev => {
       const sourceTasks = prev
         .filter(t => t.quadrant === sourceQuadrant && t.id !== active.id)
         .sort((a, b) => a.order - b.order)
-        .map((t, i) => ({ ...t, order: i }))
+        .map((t, i) => ({ ...t, order: i, updatedAt: Date.now() }))
 
       const targetTasks = prev
         .filter(t => t.quadrant === targetQuadrant)
         .sort((a, b) => a.order - b.order)
 
-      movedTask = {
+      const movedTask = {
         ...activeTask,
         quadrant: targetQuadrant,
         order: targetTasks.length,
+        updatedAt: Date.now(),
       }
 
       return [
@@ -480,9 +607,6 @@ export default function App() {
         movedTask,
       ]
     })
-    if (movedTask) {
-      syncUpdateTask(movedTask)
-    }
   }
 
   if (!user) {
@@ -490,7 +614,7 @@ export default function App() {
       <SignInScreen
         googleButtonRef={googleButtonRef}
         googleReady={googleReady}
-        hasClientId={!!GOOGLE_CLIENT_ID}
+        hasClientId={hasClientId}
       />
     )
   }
@@ -500,9 +624,7 @@ export default function App() {
       <div className="mx-auto w-full max-w-5xl">
         <div className="sticky top-0 z-10 -mx-4 mb-4 bg-gray-50/95 px-4 pb-3 pt-4 backdrop-blur sm:static sm:mx-0 sm:mb-6 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0">
           <div className="flex items-center justify-between gap-3">
-            <h1 className="text-xl font-semibold sm:text-2xl">
-              Eisenhower Matrix
-            </h1>
+            <h1 className="text-xl font-semibold sm:text-2xl">Eisenhower Matrix</h1>
 
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-2 py-1 text-xs sm:text-sm">
@@ -521,7 +643,9 @@ export default function App() {
                     setUser(null)
                     setAccessToken(null)
                     setTokenExpiry(0)
-                    setTasklistId(null)
+                    setTasks([])
+                    setSyncStatus("idle")
+                    setSyncError("")
                     if (window.google?.accounts?.id) {
                       window.google.accounts.id.disableAutoSelect()
                     }
@@ -532,20 +656,13 @@ export default function App() {
                 </button>
               </div>
 
-              {!accessToken ? (
-                <button
-                  onClick={() => {
-                    getTasksAccess({ interactive: true })
-                  }}
-                  className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
-                >
-                  Connect Google Tasks
-                </button>
-              ) : (
-                <span className="text-[11px] text-gray-500 sm:text-xs">
-                  Google Tasks connected
-                </span>
-              )}
+              <span className="text-[11px] text-gray-500 sm:text-xs">
+                {syncStatus === "syncing"
+                  ? "Syncing..."
+                  : syncStatus === "ready"
+                    ? "Synced"
+                    : "Local only"}
+              </span>
 
               <button
                 onClick={clearCompleted}
@@ -555,9 +672,7 @@ export default function App() {
               </button>
             </div>
           </div>
-          {tasksError && (
-            <p className="mt-1 text-xs text-red-500">{tasksError}</p>
-          )}
+          {syncError && <p className="mt-1 text-xs text-red-500">{syncError}</p>}
           <p className="mt-1 text-xs text-gray-500 sm:text-sm">
             Tap and hold to drag, or scroll each quadrant to view more tasks.
           </p>
@@ -573,10 +688,7 @@ export default function App() {
               <Quadrant
                 key={q.id}
                 quadrant={q}
-                tasks={tasks
-                  .filter(t => t.quadrant === q.id)
-                  .sort((a, b) => a.order - b.order)
-                }
+                tasks={sortedTasks.filter(t => t.quadrant === q.id)}
                 onAddTask={addTask}
                 onToggleTask={toggleTask}
                 onDeleteTask={deleteTask}
@@ -618,14 +730,10 @@ function SignInScreen({ googleButtonRef, googleReady, hasClientId }) {
         <div className="mt-2 flex flex-col items-center gap-2">
           <div ref={googleButtonRef} />
           {!hasClientId && (
-            <span className="text-[11px] text-gray-500">
-              Set `VITE_GOOGLE_CLIENT_ID`
-            </span>
+            <span className="text-[11px] text-gray-500">Set `VITE_GOOGLE_CLIENT_ID`</span>
           )}
           {hasClientId && !googleReady && (
-            <span className="text-[11px] text-gray-500">
-              Loading Google sign-in...
-            </span>
+            <span className="text-[11px] text-gray-500">Loading Google sign-in...</span>
           )}
         </div>
       </div>
@@ -653,8 +761,7 @@ function Quadrant({
   onAddTask,
   onToggleTask,
   onDeleteTask,
-}) 
- {
+}) {
   const [input, setInput] = useState("")
 
   const { setNodeRef } = useDroppable({
@@ -736,7 +843,6 @@ function SortableTask({ task, onToggle, onDelete }) {
       style={style}
       className="group flex items-center gap-3 text-sm sm:text-base bg-white rounded-md px-3 py-2 border"
     >
-      {/* Drag handle */}
       <span
         {...attributes}
         {...listeners}
@@ -746,7 +852,6 @@ function SortableTask({ task, onToggle, onDelete }) {
         ☰
       </span>
 
-      {/* Checkbox */}
       <input
         type="checkbox"
         checked={task.completed}
@@ -754,7 +859,6 @@ function SortableTask({ task, onToggle, onDelete }) {
         className="cursor-pointer h-4 w-4 sm:h-5 sm:w-5"
       />
 
-      {/* Text */}
       <span
         className={`flex-1 ${
           task.completed ? "line-through text-gray-400" : ""
@@ -763,7 +867,6 @@ function SortableTask({ task, onToggle, onDelete }) {
         {task.title}
       </span>
 
-      {/* Delete */}
       <button
         onClick={() => onDelete(task.id)}
         className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 text-gray-400 hover:text-red-500 px-2 text-base"
