@@ -20,6 +20,7 @@ import { CSS } from "@dnd-kit/utilities"
 
 const USER_KEY = "eisenhower_google_user_v1"
 const TASKS_STORAGE_PREFIX = "eisenhower_tasks_v2"
+const TOKEN_STORAGE_PREFIX = "eisenhower_drive_token_v1"
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
@@ -45,6 +46,9 @@ const generateId = () => {
 
 const getUserTasksStorageKey = (email) =>
   `${TASKS_STORAGE_PREFIX}:${(email || "").toLowerCase()}`
+
+const getUserTokenStorageKey = (email) =>
+  `${TOKEN_STORAGE_PREFIX}:${(email || "").toLowerCase()}`
 
 const normalizeTask = (task, fallbackOrder = 0) => {
   const safeQuadrant = VALID_QUADRANTS.has(task?.quadrant) ? task.quadrant : "UI"
@@ -129,6 +133,8 @@ export default function App() {
   useEffect(() => {
     if (!userEmail) {
       setTasks([])
+      setAccessToken(null)
+      setTokenExpiry(0)
       lastSyncedSignatureRef.current = toSignature([])
       syncInitializedRef.current = false
       fileIdRef.current = null
@@ -150,6 +156,48 @@ export default function App() {
     syncInitializedRef.current = false
     fileIdRef.current = null
   }, [userEmail])
+
+  useEffect(() => {
+    if (!userEmail) return
+    try {
+      const key = getUserTokenStorageKey(userEmail)
+      const stored = localStorage.getItem(key)
+      if (!stored) {
+        setAccessToken(null)
+        setTokenExpiry(0)
+        return
+      }
+      const parsed = JSON.parse(stored)
+      const expiresAt = Number(parsed?.tokenExpiry || 0)
+      if (parsed?.accessToken && Date.now() < expiresAt - 60_000) {
+        setAccessToken(parsed.accessToken)
+        setTokenExpiry(expiresAt)
+      } else {
+        localStorage.removeItem(key)
+        setAccessToken(null)
+        setTokenExpiry(0)
+      }
+    } catch {
+      setAccessToken(null)
+      setTokenExpiry(0)
+    }
+  }, [userEmail])
+
+  useEffect(() => {
+    if (!userEmail) return
+    const key = getUserTokenStorageKey(userEmail)
+    if (accessToken && tokenExpiry) {
+      localStorage.setItem(
+        key,
+        JSON.stringify({
+          accessToken,
+          tokenExpiry,
+        })
+      )
+    } else {
+      localStorage.removeItem(key)
+    }
+  }, [accessToken, tokenExpiry, userEmail])
 
   useEffect(() => {
     if (!userEmail) return
@@ -634,6 +682,9 @@ export default function App() {
                     setTasks([])
                     setSyncStatus("idle")
                     setSyncError("")
+                    if (user?.email) {
+                      localStorage.removeItem(getUserTokenStorageKey(user.email))
+                    }
                     if (window.google?.accounts?.id) {
                       window.google.accounts.id.disableAutoSelect()
                     }
