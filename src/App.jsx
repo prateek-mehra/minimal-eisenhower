@@ -21,6 +21,9 @@ import { CSS } from "@dnd-kit/utilities"
 const USER_KEY = "eisenhower_google_user_v1"
 const TASKS_STORAGE_PREFIX = "eisenhower_tasks_v2"
 const TOKEN_STORAGE_PREFIX = "eisenhower_drive_token_v1"
+const GUEST_NAME_KEY = "eisenhower_guest_name_v1"
+const GUEST_EMAIL = "__guest__"
+const DEFAULT_GUEST_NAME = "Guest"
 
 const GOOGLE_CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.appdata"
@@ -43,6 +46,17 @@ const generateId = () => {
   }
   return `task_${Date.now()}_${Math.random().toString(16).slice(2)}`
 }
+
+const getGuestName = (value) => {
+  const name = typeof value === "string" ? value.trim() : ""
+  return name || DEFAULT_GUEST_NAME
+}
+
+const createGuestUser = (name) => ({
+  mode: "guest",
+  name: getGuestName(name),
+  email: GUEST_EMAIL,
+})
 
 const getUserTasksStorageKey = (email) =>
   `${TASKS_STORAGE_PREFIX}:${(email || "").toLowerCase()}`
@@ -121,6 +135,13 @@ export default function App() {
       return null
     }
   })
+  const [guestName, setGuestName] = useState(() => {
+    try {
+      return getGuestName(localStorage.getItem(GUEST_NAME_KEY))
+    } catch {
+      return DEFAULT_GUEST_NAME
+    }
+  })
 
   const googleButtonRef = useRef(null)
   const tokenClientRef = useRef(null)
@@ -129,6 +150,7 @@ export default function App() {
   const fileIdRef = useRef(null)
   const syncingRef = useRef(false)
   const syncInitializedRef = useRef(false)
+  const skipNextTasksPersistRef = useRef(false)
   const lastSyncedSignatureRef = useRef(toSignature([]))
 
   const [googleReady, setGoogleReady] = useState(false)
@@ -137,7 +159,9 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState("idle")
   const [syncError, setSyncError] = useState("")
 
+  const isGuest = user?.mode === "guest"
   const userEmail = user?.email || ""
+  const storageIdentity = isGuest ? GUEST_EMAIL : userEmail
   const hasClientId = Boolean(GOOGLE_CLIENT_ID)
 
   const sortedTasks = useMemo(
@@ -159,10 +183,15 @@ export default function App() {
   }, [user])
 
   useEffect(() => {
-    if (!userEmail) {
+    localStorage.setItem(GUEST_NAME_KEY, getGuestName(guestName))
+  }, [guestName])
+
+  useEffect(() => {
+    if (!storageIdentity) {
       setTasks([])
       setAccessToken(null)
       setTokenExpiry(0)
+      skipNextTasksPersistRef.current = false
       lastSyncedSignatureRef.current = toSignature([])
       syncInitializedRef.current = false
       fileIdRef.current = null
@@ -170,23 +199,29 @@ export default function App() {
     }
 
     try {
-      const key = getUserTasksStorageKey(userEmail)
+      const key = getUserTasksStorageKey(storageIdentity)
       const stored = localStorage.getItem(key)
       const parsed = stored ? JSON.parse(stored) : []
       const normalized = normalizeTasks(parsed)
+      skipNextTasksPersistRef.current = true
       setTasks(normalized)
       lastSyncedSignatureRef.current = toSignature(normalized)
     } catch {
+      skipNextTasksPersistRef.current = true
       setTasks([])
       lastSyncedSignatureRef.current = toSignature([])
     }
 
     syncInitializedRef.current = false
     fileIdRef.current = null
-  }, [userEmail])
+  }, [storageIdentity])
 
   useEffect(() => {
-    if (!userEmail) return
+    if (!userEmail || isGuest) {
+      setAccessToken(null)
+      setTokenExpiry(0)
+      return
+    }
     try {
       const key = getUserTokenStorageKey(userEmail)
       const stored = localStorage.getItem(key)
@@ -209,10 +244,10 @@ export default function App() {
       setAccessToken(null)
       setTokenExpiry(0)
     }
-  }, [userEmail])
+  }, [isGuest, userEmail])
 
   useEffect(() => {
-    if (!userEmail) return
+    if (!userEmail || isGuest) return
     const key = getUserTokenStorageKey(userEmail)
     if (accessToken && tokenExpiry) {
       localStorage.setItem(
@@ -225,13 +260,17 @@ export default function App() {
     } else {
       localStorage.removeItem(key)
     }
-  }, [accessToken, tokenExpiry, userEmail])
+  }, [accessToken, isGuest, tokenExpiry, userEmail])
 
   useEffect(() => {
-    if (!userEmail) return
-    const key = getUserTasksStorageKey(userEmail)
+    if (!storageIdentity) return
+    if (skipNextTasksPersistRef.current) {
+      skipNextTasksPersistRef.current = false
+      return
+    }
+    const key = getUserTasksStorageKey(storageIdentity)
     localStorage.setItem(key, JSON.stringify(tasks))
-  }, [tasks, userEmail])
+  }, [storageIdentity, tasks])
 
   const renderGoogleButton = useCallback(() => {
     if (!window.google?.accounts?.id) return
@@ -538,12 +577,12 @@ export default function App() {
   }, [googleReady, user, renderGoogleButton])
 
   useEffect(() => {
-    if (!userEmail || !googleReady || !hasClientId) return
+    if (isGuest || !userEmail || !googleReady || !hasClientId) return
     syncFromCloud({ interactive: false })
-  }, [userEmail, googleReady, hasClientId, syncFromCloud])
+  }, [googleReady, hasClientId, isGuest, syncFromCloud, userEmail])
 
   useEffect(() => {
-    if (!syncInitializedRef.current || !userEmail || !hasClientId) return
+    if (!syncInitializedRef.current || isGuest || !userEmail || !hasClientId) return
 
     const currentSignature = toSignature(tasks)
     if (currentSignature === lastSyncedSignatureRef.current) return
@@ -561,7 +600,7 @@ export default function App() {
         clearTimeout(syncTimerRef.current)
       }
     }
-  }, [tasks, userEmail, hasClientId, pushTasksToCloud])
+  }, [hasClientId, isGuest, pushTasksToCloud, tasks, userEmail])
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -820,6 +859,15 @@ export default function App() {
         googleButtonRef={googleButtonRef}
         googleReady={googleReady}
         hasClientId={hasClientId}
+        guestName={guestName}
+        onGuestNameChange={setGuestName}
+        onContinueAsGuest={(name) => {
+          const nextGuestName = getGuestName(name)
+          setGuestName(nextGuestName)
+          setUser(createGuestUser(nextGuestName))
+          setSyncStatus("idle")
+          setSyncError("")
+        }}
       />
     )
   }
@@ -833,16 +881,22 @@ export default function App() {
 
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-2 py-1 text-xs sm:text-sm">
-                <img
-                  src={user.picture}
-                  alt={`${user.name} avatar`}
-                  className="h-6 w-6 rounded-full"
-                  referrerPolicy="no-referrer"
-                />
+                {user.picture ? (
+                  <img
+                    src={user.picture}
+                    alt={`${user.name} avatar`}
+                    className="h-6 w-6 rounded-full"
+                    referrerPolicy="no-referrer"
+                  />
+                ) : (
+                  <span className="grid h-6 w-6 place-items-center rounded-full bg-gray-200 text-[11px] font-semibold text-gray-600">
+                    {user.name.slice(0, 1).toUpperCase()}
+                  </span>
+                )}
                 <span className="hidden sm:inline">{user.name}</span>
                 <button
                   onClick={() => {
-                    if (accessToken && window.google?.accounts?.oauth2?.revoke) {
+                    if (!isGuest && accessToken && window.google?.accounts?.oauth2?.revoke) {
                       window.google.accounts.oauth2.revoke(accessToken, () => {})
                     }
                     setUser(null)
@@ -851,34 +905,38 @@ export default function App() {
                     setTasks([])
                     setSyncStatus("idle")
                     setSyncError("")
-                    if (user?.email) {
+                    if (!isGuest && user?.email) {
                       localStorage.removeItem(getUserTokenStorageKey(user.email))
                     }
-                    if (window.google?.accounts?.id) {
+                    if (!isGuest && window.google?.accounts?.id) {
                       window.google.accounts.id.disableAutoSelect()
                     }
                   }}
                   className="rounded-full px-2 py-1 text-xs text-gray-600 hover:text-gray-900"
                 >
-                  Sign out
+                  {isGuest ? "Exit guest mode" : "Sign out"}
                 </button>
               </div>
 
-              <span className="text-[11px] text-gray-500 sm:text-xs">
-                {syncStatus === "syncing"
-                  ? "Syncing..."
-                  : syncStatus === "ready"
-                    ? "Synced"
-                    : "Local only"}
-              </span>
+              {!isGuest && (
+                <>
+                  <span className="text-[11px] text-gray-500 sm:text-xs">
+                    {syncStatus === "syncing"
+                      ? "Syncing..."
+                      : syncStatus === "ready"
+                        ? "Synced"
+                        : "Local only"}
+                  </span>
 
-              {syncStatus !== "ready" && (
-                <button
-                  onClick={() => syncFromCloud({ interactive: true })}
-                  className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
-                >
-                  Enable cloud sync
-                </button>
+                  {syncStatus !== "ready" && (
+                    <button
+                      onClick={() => syncFromCloud({ interactive: true })}
+                      className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
+                    >
+                      Enable cloud sync
+                    </button>
+                  )}
+                </>
               )}
 
               <button
@@ -889,7 +947,7 @@ export default function App() {
               </button>
             </div>
           </div>
-          {syncError && <p className="mt-1 text-xs text-red-500">{syncError}</p>}
+          {!isGuest && syncError && <p className="mt-1 text-xs text-red-500">{syncError}</p>}
           <p className="mt-1 text-xs text-gray-500 sm:text-sm">
             Tap and hold to drag, or scroll each quadrant to view more tasks.
           </p>
@@ -920,47 +978,130 @@ export default function App() {
           </div>
         </DndContext>
 
-        <footer className="mt-6 flex items-center justify-center gap-3 text-gray-600">
-          <svg
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-            className="h-6 w-6"
-            fill="currentColor"
-          >
-            <path d="M12 0.3C5.4 0.3 0 5.7 0 12.3c0 5.3 3.4 9.8 8.2 11.4.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.9 1.3 1.9 1.3 1.1 1.9 3 1.3 3.7 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.6-1.3-5.6-6 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2.9-.3 1.9-.4 2.9-.4 1 0 2 .1 2.9.4 2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.7-2.9 5.7-5.6 6 .4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.6 4.7-1.6 8.1-6.1 8.1-11.4C24 5.7 18.6.3 12 .3z" />
-          </svg>
-          <a
-            href="https://github.com/prateek-mehra"
-            className="text-base font-medium hover:text-gray-900"
-          >
-            prateek-mehra
-          </a>
-        </footer>
+        <AppFooter className="mt-6" />
       </div>
     </div>
   )
 }
 
-function SignInScreen({ googleButtonRef, googleReady, hasClientId }) {
+function SignInScreen({
+  googleButtonRef,
+  googleReady,
+  hasClientId,
+  guestName,
+  onGuestNameChange,
+  onContinueAsGuest,
+}) {
   return (
-    <div className="min-h-[100dvh] bg-gray-50 px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6">
-      <div className="mx-auto flex w-full max-w-md flex-col items-center gap-4 rounded-2xl border border-gray-200 bg-white px-6 py-10 text-center shadow-sm">
-        <h1 className="text-2xl font-semibold">Eisenhower Matrix</h1>
-        <p className="text-sm text-gray-500">
-          Sign in with Google to access your tasks.
-        </p>
-
-        <div className="mt-2 flex flex-col items-center gap-2">
-          <div ref={googleButtonRef} />
-          {!hasClientId && (
-            <span className="text-[11px] text-gray-500">Set `VITE_GOOGLE_CLIENT_ID`</span>
-          )}
-          {hasClientId && !googleReady && (
-            <span className="text-[11px] text-gray-500">Loading Google sign-in...</span>
-          )}
+    <div className="min-h-[100dvh] bg-[radial-gradient(circle_at_top,_rgba(187,247,208,0.7),_transparent_38%),linear-gradient(180deg,_#f8fafc_0%,_#eef2f7_100%)] px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6">
+      <div className="mx-auto flex w-full max-w-3xl flex-col items-center justify-center gap-6 py-8 sm:min-h-[calc(100dvh-3rem)] sm:py-0">
+        <div className="text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-white/80 shadow-sm ring-1 ring-white/70 backdrop-blur">
+            <div className="grid h-8 w-8 grid-cols-2 gap-1">
+              <span className="rounded bg-emerald-300" />
+              <span className="rounded bg-amber-200" />
+              <span className="rounded bg-rose-200" />
+              <span className="rounded bg-sky-200" />
+            </div>
+          </div>
+          <h1 className="text-3xl font-semibold tracking-tight text-gray-900 sm:text-4xl">
+            Eisenhower Matrix
+          </h1>
+          <p className="mx-auto mt-3 max-w-xl text-sm text-gray-600 sm:text-base">
+            Sign in with Google for cross-device sync, or continue as a guest for local-only access.
+          </p>
         </div>
+
+        <div className="grid w-full max-w-3xl gap-4 md:grid-cols-2">
+          <div className="rounded-3xl border border-white/80 bg-white/85 p-6 text-center shadow-[0_16px_40px_rgba(15,23,42,0.08)] backdrop-blur">
+            <div className="mb-5 flex flex-col items-center">
+              <div className="mb-2 inline-flex rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-emerald-700">
+                Sync
+              </div>
+            </div>
+
+            <div className="flex min-h-12 items-center justify-center rounded-2xl border border-gray-100 bg-gray-50/70 p-3">
+              <div ref={googleButtonRef} />
+            </div>
+            {!hasClientId && (
+              <span className="mt-3 block text-[11px] text-gray-500">Set `VITE_GOOGLE_CLIENT_ID`</span>
+            )}
+            {hasClientId && !googleReady && (
+              <span className="mt-3 block text-[11px] text-gray-500">Loading Google sign-in...</span>
+            )}
+          </div>
+
+          <div className="rounded-3xl border border-white/80 bg-white/85 p-6 text-center shadow-[0_16px_40px_rgba(15,23,42,0.08)] backdrop-blur">
+            <div className="mb-5 flex flex-col items-center">
+              <div className="mb-2 inline-flex rounded-full bg-slate-100 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.2em] text-slate-700">
+                Guest
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <input
+                value={guestName === DEFAULT_GUEST_NAME ? "" : guestName}
+                onChange={e => onGuestNameChange(e.target.value)}
+                className="w-full rounded-2xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-900 outline-none transition focus:border-emerald-300 focus:bg-white focus:ring-2 focus:ring-emerald-100"
+                placeholder="Add a nickname"
+                maxLength={32}
+              />
+              <button
+                onClick={() => onContinueAsGuest(guestName)}
+                className="w-full rounded-2xl border border-gray-300 bg-white px-4 py-3 text-sm font-medium text-gray-700 transition hover:bg-gray-50"
+              >
+                Continue without login
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <AppFooter />
       </div>
     </div>
+  )
+}
+
+function AppFooter({ className = "" }) {
+  return (
+    <footer
+      className={`flex flex-wrap items-center justify-center gap-x-3 gap-y-2 text-gray-600 ${className}`.trim()}
+    >
+      <div className="flex items-center gap-3">
+        <svg
+          viewBox="0 0 24 24"
+          aria-hidden="true"
+          className="h-6 w-6"
+          fill="currentColor"
+        >
+          <path d="M12 0.3C5.4 0.3 0 5.7 0 12.3c0 5.3 3.4 9.8 8.2 11.4.6.1.8-.3.8-.6v-2.2c-3.3.7-4-1.6-4-1.6-.6-1.4-1.4-1.8-1.4-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.9 1.3 1.9 1.3 1.1 1.9 3 1.3 3.7 1 .1-.8.4-1.3.7-1.6-2.7-.3-5.6-1.3-5.6-6 0-1.3.5-2.4 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2.9-.3 1.9-.4 2.9-.4 1 0 2 .1 2.9.4 2.3-1.5 3.3-1.2 3.3-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.7-2.9 5.7-5.6 6 .4.3.8 1 .8 2.1v3.1c0 .3.2.7.8.6 4.7-1.6 8.1-6.1 8.1-11.4C24 5.7 18.6.3 12 .3z" />
+        </svg>
+        <a
+          href="https://github.com/prateek-mehra"
+          className="text-base font-medium hover:text-gray-900"
+        >
+          prateek-mehra
+        </a>
+      </div>
+
+      <div className="hidden h-4 w-px bg-gray-300 sm:block" aria-hidden="true" />
+
+      <div className="flex items-center gap-2 text-sm sm:text-base">
+        <span>Have feedback? Mail me:</span>
+        <a
+          href="mailto:partumehra@gmail.com"
+          className="inline-flex items-center gap-2 font-medium text-gray-700 hover:text-gray-900"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5">
+            <path fill="#EA4335" d="M3 6.75 12 13l9-6.25V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+            <path fill="#34A853" d="M3 6.75V18l6.75-5.25Z" />
+            <path fill="#4285F4" d="M21 6.75V18l-6.75-5.25Z" />
+            <path fill="#FBBC04" d="M21 6.75 12 13 3 6.75 4.47 5.6A2 2 0 0 1 5.7 5h12.6a2 2 0 0 1 1.23.6Z" />
+          </svg>
+          <span>partumehra@gmail.com</span>
+        </a>
+      </div>
+    </footer>
   )
 }
 
@@ -1169,14 +1310,14 @@ function SortableTask({
       className="group bg-white rounded-md border px-3 py-2 text-sm sm:text-base"
     >
       <div
+        {...attributes}
+        {...listeners}
         className={`flex items-center gap-3 ${
           hasSubtasks ? "cursor-pointer" : ""
         }`}
         onClick={toggleSubtasksCollapsed}
       >
         <button
-          {...attributes}
-          {...listeners}
           type="button"
           onClick={e => {
             e.stopPropagation()
@@ -1197,6 +1338,7 @@ function SortableTask({
         <input
           type="checkbox"
           checked={task.completed}
+          onPointerDown={e => e.stopPropagation()}
           onChange={() => {
             if (!taskLocked) onToggle(task.id)
           }}
@@ -1213,6 +1355,7 @@ function SortableTask({
             className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-sm sm:text-base"
             value={taskTitleInput}
             autoFocus
+            onPointerDown={e => e.stopPropagation()}
             onClick={e => e.stopPropagation()}
             onChange={e => setTaskTitleInput(e.target.value)}
             onKeyDown={e => {
@@ -1230,6 +1373,7 @@ function SortableTask({
           <span className="min-w-0 flex-1 text-left">
             <button
               onClick={showTaskTitleEditor}
+              onPointerDown={e => e.stopPropagation()}
               className={`inline-block max-w-full truncate align-bottom ${
                 task.completed ? "line-through text-gray-400" : ""
               }`}
@@ -1259,6 +1403,7 @@ function SortableTask({
 
         <button
           onClick={showSubtaskEditor}
+          onPointerDown={e => e.stopPropagation()}
           className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-gray-200 text-base leading-none text-gray-500 hover:bg-gray-50 hover:text-gray-900"
           title="Add subtask"
           aria-label={`Add subtask to ${task.title}`}
@@ -1271,6 +1416,7 @@ function SortableTask({
             e.stopPropagation()
             if (!taskLocked) onDelete(task.id)
           }}
+          onPointerDown={e => e.stopPropagation()}
           disabled={taskLocked}
           className={`px-2 text-base ${
             taskLocked
