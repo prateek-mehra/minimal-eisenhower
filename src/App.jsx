@@ -598,6 +598,19 @@ export default function App() {
     )
   }
 
+  const updateTaskTitle = (id, title) => {
+    const nextTitle = title.trim()
+    if (!nextTitle) return
+
+    setTasks(prev =>
+      prev.map(task =>
+        task.id === id
+          ? { ...task, title: nextTitle, updatedAt: Date.now() }
+          : task
+      )
+    )
+  }
+
   const addSubtask = (taskId, title) => {
     if (!title.trim()) return
 
@@ -636,6 +649,28 @@ export default function App() {
           subtasks: normalizeSubtasks(task.subtasks).map(subtask =>
             subtask.id === subtaskId
               ? { ...subtask, completed: !subtask.completed, updatedAt: now }
+              : subtask
+          ),
+          updatedAt: now,
+        }
+      })
+    )
+  }
+
+  const updateSubtaskTitle = (taskId, subtaskId, title) => {
+    const nextTitle = title.trim()
+    if (!nextTitle) return
+
+    setTasks(prev =>
+      prev.map(task => {
+        if (task.id !== taskId) return task
+
+        const now = Date.now()
+        return {
+          ...task,
+          subtasks: normalizeSubtasks(task.subtasks).map(subtask =>
+            subtask.id === subtaskId
+              ? { ...subtask, title: nextTitle, updatedAt: now }
               : subtask
           ),
           updatedAt: now,
@@ -873,8 +908,10 @@ export default function App() {
                 tasks={sortedTasks.filter(t => t.quadrant === q.id)}
                 onAddTask={addTask}
                 onToggleTask={toggleTask}
+                onUpdateTaskTitle={updateTaskTitle}
                 onAddSubtask={addSubtask}
                 onToggleSubtask={toggleSubtask}
+                onUpdateSubtaskTitle={updateSubtaskTitle}
                 onUpdateSubtaskUrl={updateSubtaskUrl}
                 onDeleteSubtask={deleteSubtask}
                 onDeleteTask={deleteTask}
@@ -941,19 +978,15 @@ function decodeJwt(token) {
   }
 }
 
-function formatUrl(url) {
-  if (!url) return ""
-  if (/^https?:\/\//i.test(url)) return url
-  return `https://${url}`
-}
-
 function Quadrant({
   quadrant,
   tasks,
   onAddTask,
   onToggleTask,
+  onUpdateTaskTitle,
   onAddSubtask,
   onToggleSubtask,
+  onUpdateSubtaskTitle,
   onUpdateSubtaskUrl,
   onDeleteSubtask,
   onDeleteTask,
@@ -990,8 +1023,10 @@ function Quadrant({
               key={task.id}
               task={task}
               onToggle={onToggleTask}
+              onUpdateTaskTitle={onUpdateTaskTitle}
               onAddSubtask={onAddSubtask}
               onToggleSubtask={onToggleSubtask}
+              onUpdateSubtaskTitle={onUpdateSubtaskTitle}
               onUpdateSubtaskUrl={onUpdateSubtaskUrl}
               onDeleteSubtask={onDeleteSubtask}
               onDelete={onDeleteTask}
@@ -1023,8 +1058,10 @@ function Quadrant({
 function SortableTask({
   task,
   onToggle,
+  onUpdateTaskTitle,
   onAddSubtask,
   onToggleSubtask,
+  onUpdateSubtaskTitle,
   onUpdateSubtaskUrl,
   onDeleteSubtask,
   onDelete,
@@ -1032,6 +1069,10 @@ function SortableTask({
   const [subtaskInput, setSubtaskInput] = useState("")
   const [subtasksCollapsed, setSubtasksCollapsed] = useState(false)
   const [addingSubtask, setAddingSubtask] = useState(false)
+  const [editingTaskTitle, setEditingTaskTitle] = useState(false)
+  const [taskTitleInput, setTaskTitleInput] = useState(task.title)
+  const [editingSubtaskTitleId, setEditingSubtaskTitleId] = useState(null)
+  const [subtaskTitleInput, setSubtaskTitleInput] = useState("")
   const [editingLinkId, setEditingLinkId] = useState(null)
   const [subtaskUrlInput, setSubtaskUrlInput] = useState("")
   const {
@@ -1073,6 +1114,38 @@ function SortableTask({
     setSubtasksCollapsed(false)
   }
 
+  const showTaskTitleEditor = (e) => {
+    e.stopPropagation()
+    setTaskTitleInput(task.title)
+    setEditingTaskTitle(true)
+  }
+
+  const saveTaskTitle = () => {
+    if (!taskTitleInput.trim()) {
+      setTaskTitleInput(task.title)
+      setEditingTaskTitle(false)
+      return
+    }
+    onUpdateTaskTitle(task.id, taskTitleInput)
+    setEditingTaskTitle(false)
+  }
+
+  const showSubtaskTitleEditor = (subtask) => {
+    setSubtaskTitleInput(subtask.title)
+    setEditingSubtaskTitleId(subtask.id)
+  }
+
+  const saveSubtaskTitle = (subtaskId) => {
+    if (!subtaskTitleInput.trim()) {
+      setEditingSubtaskTitleId(null)
+      setSubtaskTitleInput("")
+      return
+    }
+    onUpdateSubtaskTitle(task.id, subtaskId, subtaskTitleInput)
+    setEditingSubtaskTitleId(null)
+    setSubtaskTitleInput("")
+  }
+
   const showLinkEditor = (subtask) => {
     setEditingLinkId(subtask.id)
     setSubtaskUrlInput(subtask.url || "")
@@ -1085,6 +1158,10 @@ function SortableTask({
     setSubtaskUrlInput("")
   }
 
+  const toggleSubtasksCollapsed = () => {
+    if (hasSubtasks) setSubtasksCollapsed(collapsed => !collapsed)
+  }
+
   return (
     <div
       ref={setNodeRef}
@@ -1095,30 +1172,27 @@ function SortableTask({
         className={`flex items-center gap-3 ${
           hasSubtasks ? "cursor-pointer" : ""
         }`}
-        onClick={() => {
-          if (hasSubtasks) setSubtasksCollapsed(collapsed => !collapsed)
-        }}
-        role={hasSubtasks ? "button" : undefined}
-        aria-expanded={hasSubtasks ? !subtasksCollapsed : undefined}
-        tabIndex={hasSubtasks ? 0 : undefined}
-        onKeyDown={e => {
-          if (!hasSubtasks) return
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            setSubtasksCollapsed(collapsed => !collapsed)
-          }
-        }}
-        title={hasSubtasks ? "Show or hide subtasks" : undefined}
+        onClick={toggleSubtasksCollapsed}
       >
-        <span
+        <button
           {...attributes}
           {...listeners}
-          className="cursor-grab text-gray-400 text-lg leading-none touch-none select-none"
-          title="Drag"
-          onClick={e => e.stopPropagation()}
+          type="button"
+          onClick={e => {
+            e.stopPropagation()
+            toggleSubtasksCollapsed()
+          }}
+          className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-sm leading-none touch-none select-none ${
+            hasSubtasks
+              ? "cursor-pointer text-gray-500 hover:bg-gray-50 hover:text-gray-900"
+              : "cursor-default text-gray-200"
+          }`}
+          title={hasSubtasks ? "Show or hide subtasks" : "No subtasks"}
+          aria-label={hasSubtasks ? "Show or hide subtasks" : "No subtasks"}
+          aria-expanded={hasSubtasks ? !subtasksCollapsed : undefined}
         >
-          ☰
-        </span>
+          {hasSubtasks && !subtasksCollapsed ? "v" : ">"}
+        </button>
 
         <input
           type="checkbox"
@@ -1134,13 +1208,38 @@ function SortableTask({
           }`}
         />
 
-        <span
-          className={`min-w-0 flex-1 text-left ${
-            task.completed ? "line-through text-gray-400" : ""
-          }`}
-        >
-          {task.title}
-        </span>
+        {editingTaskTitle ? (
+          <input
+            className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-sm sm:text-base"
+            value={taskTitleInput}
+            autoFocus
+            onClick={e => e.stopPropagation()}
+            onChange={e => setTaskTitleInput(e.target.value)}
+            onKeyDown={e => {
+              e.stopPropagation()
+              if (e.key === "Enter") saveTaskTitle()
+              if (e.key === "Escape") {
+                setTaskTitleInput(task.title)
+                setEditingTaskTitle(false)
+              }
+            }}
+            onBlur={saveTaskTitle}
+            aria-label={`Rename ${task.title}`}
+          />
+        ) : (
+          <span className="min-w-0 flex-1 text-left">
+            <button
+              onClick={showTaskTitleEditor}
+              className={`inline-block max-w-full truncate align-bottom ${
+                task.completed ? "line-through text-gray-400" : ""
+              }`}
+              title="Rename task"
+              aria-label={`Rename ${task.title}`}
+            >
+              {task.title}
+            </button>
+          </span>
+        )}
 
         {subtasks.length > 0 && (
           <span
@@ -1199,24 +1298,37 @@ function SortableTask({
                 onChange={() => onToggleSubtask(task.id, subtask.id)}
                 className="h-3.5 w-3.5 cursor-pointer"
               />
-              {subtask.url ? (
-                <a
-                  href={formatUrl(subtask.url)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={`min-w-0 flex-1 truncate text-left underline-offset-2 hover:underline ${
-                    subtask.completed ? "line-through text-gray-400" : "text-gray-600"
-                  }`}
-                >
-                  {subtask.title}
-                </a>
+              {editingSubtaskTitleId === subtask.id ? (
+                <input
+                  className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
+                  value={subtaskTitleInput}
+                  autoFocus
+                  onChange={e => setSubtaskTitleInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") saveSubtaskTitle(subtask.id)
+                    if (e.key === "Escape") {
+                      setEditingSubtaskTitleId(null)
+                      setSubtaskTitleInput("")
+                    }
+                  }}
+                  onBlur={() => saveSubtaskTitle(subtask.id)}
+                  aria-label={`Rename subtask ${subtask.title}`}
+                />
               ) : (
-                <span
-                  className={`min-w-0 flex-1 text-left ${
-                    subtask.completed ? "line-through text-gray-400" : "text-gray-600"
-                  }`}
-                >
-                  {subtask.title}
+                <span className="min-w-0 flex-1 text-left">
+                  <button
+                    onClick={e => {
+                      e.stopPropagation()
+                      showSubtaskTitleEditor(subtask)
+                    }}
+                    className={`inline-block max-w-full truncate align-bottom ${
+                      subtask.completed ? "line-through text-gray-400" : "text-gray-600"
+                    }`}
+                    title="Rename subtask"
+                    aria-label={`Rename subtask ${subtask.title}`}
+                  >
+                    {subtask.title}
+                  </button>
                 </span>
               )}
               <button
