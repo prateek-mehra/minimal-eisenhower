@@ -50,6 +50,24 @@ const getUserTasksStorageKey = (email) =>
 const getUserTokenStorageKey = (email) =>
   `${TOKEN_STORAGE_PREFIX}:${(email || "").toLowerCase()}`
 
+const normalizeSubtask = (subtask, fallbackOrder = 0) => ({
+  id: subtask?.id || generateId(),
+  title: typeof subtask?.title === "string" ? subtask.title : "",
+  completed: Boolean(subtask?.completed),
+  order: Number.isFinite(subtask?.order) ? subtask.order : fallbackOrder,
+  updatedAt: Number.isFinite(subtask?.updatedAt) ? subtask.updatedAt : 0,
+})
+
+const normalizeSubtasks = (rawSubtasks) => {
+  if (!Array.isArray(rawSubtasks)) return []
+  return rawSubtasks
+    .map((subtask, index) => normalizeSubtask(subtask, index))
+    .sort((a, b) => {
+      if (a.order !== b.order) return a.order - b.order
+      return a.id.localeCompare(b.id)
+    })
+}
+
 const normalizeTask = (task, fallbackOrder = 0) => {
   const safeQuadrant = VALID_QUADRANTS.has(task?.quadrant) ? task.quadrant : "UI"
   return {
@@ -57,6 +75,7 @@ const normalizeTask = (task, fallbackOrder = 0) => {
     title: typeof task?.title === "string" ? task.title : "",
     quadrant: safeQuadrant,
     completed: Boolean(task?.completed),
+    subtasks: normalizeSubtasks(task?.subtasks),
     order: Number.isFinite(task?.order) ? task.order : fallbackOrder,
     updatedAt: Number.isFinite(task?.updatedAt) ? task.updatedAt : 0,
   }
@@ -69,7 +88,15 @@ const normalizeTasks = (rawTasks) => {
 
 const getLatestUpdate = (taskList) => {
   if (!taskList.length) return 0
-  return taskList.reduce((max, task) => Math.max(max, task.updatedAt || 0), 0)
+  return taskList.reduce(
+    (max, task) =>
+      Math.max(
+        max,
+        task.updatedAt || 0,
+        ...normalizeSubtasks(task.subtasks).map(subtask => subtask.updatedAt || 0)
+      ),
+    0
+  )
 }
 
 const toSignature = (taskList) =>
@@ -554,6 +581,7 @@ export default function App() {
         title,
         quadrant,
         completed: false,
+        subtasks: [],
         order: prev.filter(t => t.quadrant === quadrant).length,
         updatedAt: now,
       }
@@ -569,12 +597,98 @@ export default function App() {
     )
   }
 
+  const addSubtask = (taskId, title) => {
+    if (!title.trim()) return
+
+    setTasks(prev =>
+      prev.map(task => {
+        if (task.id !== taskId) return task
+
+        const subtasks = normalizeSubtasks(task.subtasks)
+        const now = Date.now()
+        return {
+          ...task,
+          subtasks: [
+            ...subtasks,
+            {
+              id: generateId(),
+              title: title.trim(),
+              completed: false,
+              order: subtasks.length,
+              updatedAt: now,
+            },
+          ],
+          updatedAt: now,
+        }
+      })
+    )
+  }
+
+  const toggleSubtask = (taskId, subtaskId) => {
+    setTasks(prev =>
+      prev.map(task => {
+        if (task.id !== taskId) return task
+
+        const now = Date.now()
+        return {
+          ...task,
+          subtasks: normalizeSubtasks(task.subtasks).map(subtask =>
+            subtask.id === subtaskId
+              ? { ...subtask, completed: !subtask.completed, updatedAt: now }
+              : subtask
+          ),
+          updatedAt: now,
+        }
+      })
+    )
+  }
+
+  const deleteSubtask = (taskId, subtaskId) => {
+    setTasks(prev =>
+      prev.map(task => {
+        if (task.id !== taskId) return task
+
+        const now = Date.now()
+        return {
+          ...task,
+          subtasks: normalizeSubtasks(task.subtasks)
+            .filter(subtask => subtask.id !== subtaskId)
+            .map((subtask, index) => ({ ...subtask, order: index, updatedAt: now })),
+          updatedAt: now,
+        }
+      })
+    )
+  }
+
   const deleteTask = (id) => {
     setTasks(prev => prev.filter(t => t.id !== id))
   }
 
   const clearCompleted = () => {
-    setTasks(prev => prev.filter(t => !t.completed))
+    setTasks(prev => {
+      const now = Date.now()
+      return prev
+        .filter(task => !task.completed)
+        .map(task => {
+          const activeSubtasks = normalizeSubtasks(task.subtasks).filter(
+            subtask => !subtask.completed
+          )
+
+          if (activeSubtasks.length === normalizeSubtasks(task.subtasks).length) {
+            return task
+          }
+
+          return {
+            ...task,
+            subtasks: activeSubtasks.map((subtask, index) => ({
+              ...subtask,
+              order: index,
+              updatedAt: now,
+            })),
+            updatedAt: now,
+          }
+        })
+    })
   }
 
   const reorderTasks = (quadrantTasks, from, to) => {
@@ -739,6 +853,9 @@ export default function App() {
                 tasks={sortedTasks.filter(t => t.quadrant === q.id)}
                 onAddTask={addTask}
                 onToggleTask={toggleTask}
+                onAddSubtask={addSubtask}
+                onToggleSubtask={toggleSubtask}
+                onDeleteSubtask={deleteSubtask}
                 onDeleteTask={deleteTask}
               />
             ))}
@@ -808,6 +925,9 @@ function Quadrant({
   tasks,
   onAddTask,
   onToggleTask,
+  onAddSubtask,
+  onToggleSubtask,
+  onDeleteSubtask,
   onDeleteTask,
 }) {
   const [input, setInput] = useState("")
@@ -842,6 +962,9 @@ function Quadrant({
               key={task.id}
               task={task}
               onToggle={onToggleTask}
+              onAddSubtask={onAddSubtask}
+              onToggleSubtask={onToggleSubtask}
+              onDeleteSubtask={onDeleteSubtask}
               onDelete={onDeleteTask}
             />
           ))}
@@ -868,7 +991,16 @@ function Quadrant({
   )
 }
 
-function SortableTask({ task, onToggle, onDelete }) {
+function SortableTask({
+  task,
+  onToggle,
+  onAddSubtask,
+  onToggleSubtask,
+  onDeleteSubtask,
+  onDelete,
+}) {
+  const [subtaskInput, setSubtaskInput] = useState("")
+  const [subtasksCollapsed, setSubtasksCollapsed] = useState(false)
   const {
     attributes,
     listeners,
@@ -885,44 +1017,160 @@ function SortableTask({ task, onToggle, onDelete }) {
     transition,
   }
 
+  const subtasks = normalizeSubtasks(task.subtasks)
+  const completedSubtasks = subtasks.filter(subtask => subtask.completed).length
+  const hasIncompleteSubtasks = subtasks.some(subtask => !subtask.completed)
+  const taskLocked = hasIncompleteSubtasks
+  const hasSubtasks = subtasks.length > 0
+  const subtaskCompletionPercent = hasSubtasks
+    ? Math.round((completedSubtasks / subtasks.length) * 100)
+    : 0
+
+  const handleAddSubtask = () => {
+    onAddSubtask(task.id, subtaskInput)
+    setSubtaskInput("")
+    setSubtasksCollapsed(false)
+  }
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="group flex items-center gap-3 text-sm sm:text-base bg-white rounded-md px-3 py-2 border"
+      className="group bg-white rounded-md border px-3 py-2 text-sm sm:text-base"
     >
-      <span
-        {...attributes}
-        {...listeners}
-        className="cursor-grab text-gray-400 text-lg leading-none touch-none select-none"
-        title="Drag"
+      <div
+        className={`flex items-center gap-3 ${
+          hasSubtasks ? "cursor-pointer" : ""
+        }`}
+        onClick={() => {
+          if (hasSubtasks) setSubtasksCollapsed(collapsed => !collapsed)
+        }}
+        role={hasSubtasks ? "button" : undefined}
+        aria-expanded={hasSubtasks ? !subtasksCollapsed : undefined}
+        tabIndex={hasSubtasks ? 0 : undefined}
+        onKeyDown={e => {
+          if (!hasSubtasks) return
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            setSubtasksCollapsed(collapsed => !collapsed)
+          }
+        }}
+        title={hasSubtasks ? "Show or hide subtasks" : undefined}
       >
-        ☰
-      </span>
+        <span
+          {...attributes}
+          {...listeners}
+          className="cursor-grab text-gray-400 text-lg leading-none touch-none select-none"
+          title="Drag"
+          onClick={e => e.stopPropagation()}
+        >
+          ☰
+        </span>
 
-      <input
-        type="checkbox"
-        checked={task.completed}
-        onChange={() => onToggle(task.id)}
-        className="cursor-pointer h-4 w-4 sm:h-5 sm:w-5"
-      />
+        <input
+          type="checkbox"
+          checked={task.completed}
+          onChange={() => {
+            if (!taskLocked) onToggle(task.id)
+          }}
+          onClick={e => e.stopPropagation()}
+          disabled={taskLocked}
+          title={taskLocked ? "Complete all subtasks first" : "Complete task"}
+          className={`h-4 w-4 sm:h-5 sm:w-5 ${
+            taskLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+          }`}
+        />
 
-      <span
-        className={`flex-1 ${
-          task.completed ? "line-through text-gray-400" : ""
+        <span
+          className={`min-w-0 flex-1 text-left ${
+            task.completed ? "line-through text-gray-400" : ""
+          }`}
+        >
+          {task.title}
+        </span>
+
+        {subtasks.length > 0 && (
+          <span
+            className="relative isolate h-5 min-w-11 shrink-0 overflow-hidden rounded-full border border-gray-200 bg-gray-100 px-2 text-center text-[11px] leading-5 text-gray-600"
+            aria-label={`${completedSubtasks} of ${subtasks.length} subtasks complete`}
+            title={`${subtaskCompletionPercent}% complete`}
+          >
+            <span
+              className="absolute inset-y-0 left-0 -z-10 bg-emerald-300 transition-[width] duration-200"
+              style={{ width: `${subtaskCompletionPercent}%` }}
+            />
+            <span className="relative font-medium">
+              {completedSubtasks}/{subtasks.length}
+            </span>
+          </span>
+        )}
+
+        <button
+          onClick={e => {
+            e.stopPropagation()
+            if (!taskLocked) onDelete(task.id)
+          }}
+          disabled={taskLocked}
+          className={`px-2 text-base ${
+            taskLocked
+              ? "cursor-not-allowed text-gray-200"
+              : "text-gray-400 hover:text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
+          }`}
+          title={taskLocked ? "Complete all subtasks first" : "Delete"}
+          aria-label={`Delete ${task.title}`}
+        >
+          ✕
+        </button>
+      </div>
+
+      <div
+        className={`mt-2 space-y-1 border-t border-gray-100 pt-2 ${
+          subtasksCollapsed ? "hidden" : ""
         }`}
       >
-        {task.title}
-      </span>
+        {subtasks.map(subtask => (
+          <div key={subtask.id} className="flex items-center gap-2 pl-8 text-xs sm:text-sm">
+            <input
+              type="checkbox"
+              checked={subtask.completed}
+              onChange={() => onToggleSubtask(task.id, subtask.id)}
+              className="h-3.5 w-3.5 cursor-pointer"
+            />
+            <span
+              className={`min-w-0 flex-1 text-left ${
+                subtask.completed ? "line-through text-gray-400" : "text-gray-600"
+              }`}
+            >
+              {subtask.title}
+            </span>
+            <button
+              onClick={() => onDeleteSubtask(task.id, subtask.id)}
+              className="px-1 text-sm text-gray-300 hover:text-red-500"
+              title="Delete subtask"
+              aria-label={`Delete subtask ${subtask.title}`}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
 
-      <button
-        onClick={() => onDelete(task.id)}
-        className="opacity-100 sm:opacity-0 sm:group-hover:opacity-100 text-gray-400 hover:text-red-500 px-2 text-base"
-        title="Delete"
-        aria-label={`Delete ${task.title}`}
-      >
-        ✕
-      </button>
+        <div className="flex gap-2 pl-8">
+          <input
+            className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
+            placeholder="Add subtask"
+            value={subtaskInput}
+            onChange={e => setSubtaskInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && handleAddSubtask()}
+          />
+          <button
+            onClick={handleAddSubtask}
+            className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
+            aria-label={`Add subtask to ${task.title}`}
+          >
+            Add
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
