@@ -53,6 +53,7 @@ const getUserTokenStorageKey = (email) =>
 const normalizeSubtask = (subtask, fallbackOrder = 0) => ({
   id: subtask?.id || generateId(),
   title: typeof subtask?.title === "string" ? subtask.title : "",
+  url: typeof subtask?.url === "string" ? subtask.url : "",
   completed: Boolean(subtask?.completed),
   order: Number.isFinite(subtask?.order) ? subtask.order : fallbackOrder,
   updatedAt: Number.isFinite(subtask?.updatedAt) ? subtask.updatedAt : 0,
@@ -643,6 +644,25 @@ export default function App() {
     )
   }
 
+  const updateSubtaskUrl = (taskId, subtaskId, url) => {
+    setTasks(prev =>
+      prev.map(task => {
+        if (task.id !== taskId) return task
+
+        const now = Date.now()
+        return {
+          ...task,
+          subtasks: normalizeSubtasks(task.subtasks).map(subtask =>
+            subtask.id === subtaskId
+              ? { ...subtask, url: url.trim(), updatedAt: now }
+              : subtask
+          ),
+          updatedAt: now,
+        }
+      })
+    )
+  }
+
   const deleteSubtask = (taskId, subtaskId) => {
     setTasks(prev =>
       prev.map(task => {
@@ -855,6 +875,7 @@ export default function App() {
                 onToggleTask={toggleTask}
                 onAddSubtask={addSubtask}
                 onToggleSubtask={toggleSubtask}
+                onUpdateSubtaskUrl={updateSubtaskUrl}
                 onDeleteSubtask={deleteSubtask}
                 onDeleteTask={deleteTask}
               />
@@ -920,6 +941,12 @@ function decodeJwt(token) {
   }
 }
 
+function formatUrl(url) {
+  if (!url) return ""
+  if (/^https?:\/\//i.test(url)) return url
+  return `https://${url}`
+}
+
 function Quadrant({
   quadrant,
   tasks,
@@ -927,6 +954,7 @@ function Quadrant({
   onToggleTask,
   onAddSubtask,
   onToggleSubtask,
+  onUpdateSubtaskUrl,
   onDeleteSubtask,
   onDeleteTask,
 }) {
@@ -964,6 +992,7 @@ function Quadrant({
               onToggle={onToggleTask}
               onAddSubtask={onAddSubtask}
               onToggleSubtask={onToggleSubtask}
+              onUpdateSubtaskUrl={onUpdateSubtaskUrl}
               onDeleteSubtask={onDeleteSubtask}
               onDelete={onDeleteTask}
             />
@@ -996,11 +1025,15 @@ function SortableTask({
   onToggle,
   onAddSubtask,
   onToggleSubtask,
+  onUpdateSubtaskUrl,
   onDeleteSubtask,
   onDelete,
 }) {
   const [subtaskInput, setSubtaskInput] = useState("")
   const [subtasksCollapsed, setSubtasksCollapsed] = useState(false)
+  const [addingSubtask, setAddingSubtask] = useState(false)
+  const [editingLinkId, setEditingLinkId] = useState(null)
+  const [subtaskUrlInput, setSubtaskUrlInput] = useState("")
   const {
     attributes,
     listeners,
@@ -1027,9 +1060,29 @@ function SortableTask({
     : 0
 
   const handleAddSubtask = () => {
+    if (!subtaskInput.trim()) return
     onAddSubtask(task.id, subtaskInput)
     setSubtaskInput("")
     setSubtasksCollapsed(false)
+    setAddingSubtask(false)
+  }
+
+  const showSubtaskEditor = (e) => {
+    e.stopPropagation()
+    setAddingSubtask(true)
+    setSubtasksCollapsed(false)
+  }
+
+  const showLinkEditor = (subtask) => {
+    setEditingLinkId(subtask.id)
+    setSubtaskUrlInput(subtask.url || "")
+    setSubtasksCollapsed(false)
+  }
+
+  const saveSubtaskUrl = (subtaskId) => {
+    onUpdateSubtaskUrl(task.id, subtaskId, subtaskUrlInput)
+    setEditingLinkId(null)
+    setSubtaskUrlInput("")
   }
 
   return (
@@ -1106,6 +1159,15 @@ function SortableTask({
         )}
 
         <button
+          onClick={showSubtaskEditor}
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-gray-200 text-base leading-none text-gray-500 hover:bg-gray-50 hover:text-gray-900"
+          title="Add subtask"
+          aria-label={`Add subtask to ${task.title}`}
+        >
+          +
+        </button>
+
+        <button
           onClick={e => {
             e.stopPropagation()
             if (!taskLocked) onDelete(task.id)
@@ -1125,51 +1187,126 @@ function SortableTask({
 
       <div
         className={`mt-2 space-y-1 border-t border-gray-100 pt-2 ${
-          subtasksCollapsed ? "hidden" : ""
+          subtasksCollapsed || (!hasSubtasks && !addingSubtask) ? "hidden" : ""
         }`}
       >
         {subtasks.map(subtask => (
-          <div key={subtask.id} className="flex items-center gap-2 pl-8 text-xs sm:text-sm">
-            <input
-              type="checkbox"
-              checked={subtask.completed}
-              onChange={() => onToggleSubtask(task.id, subtask.id)}
-              className="h-3.5 w-3.5 cursor-pointer"
-            />
-            <span
-              className={`min-w-0 flex-1 text-left ${
-                subtask.completed ? "line-through text-gray-400" : "text-gray-600"
-              }`}
-            >
-              {subtask.title}
-            </span>
-            <button
-              onClick={() => onDeleteSubtask(task.id, subtask.id)}
-              className="px-1 text-sm text-gray-300 hover:text-red-500"
-              title="Delete subtask"
-              aria-label={`Delete subtask ${subtask.title}`}
-            >
-              ✕
-            </button>
+          <div key={subtask.id} className="space-y-1 pl-8">
+            <div className="flex items-center gap-2 text-xs sm:text-sm">
+              <input
+                type="checkbox"
+                checked={subtask.completed}
+                onChange={() => onToggleSubtask(task.id, subtask.id)}
+                className="h-3.5 w-3.5 cursor-pointer"
+              />
+              {subtask.url ? (
+                <a
+                  href={formatUrl(subtask.url)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={`min-w-0 flex-1 truncate text-left underline-offset-2 hover:underline ${
+                    subtask.completed ? "line-through text-gray-400" : "text-gray-600"
+                  }`}
+                >
+                  {subtask.title}
+                </a>
+              ) : (
+                <span
+                  className={`min-w-0 flex-1 text-left ${
+                    subtask.completed ? "line-through text-gray-400" : "text-gray-600"
+                  }`}
+                >
+                  {subtask.title}
+                </span>
+              )}
+              <button
+                onClick={() => showLinkEditor(subtask)}
+                className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[11px] leading-none ${
+                  subtask.url
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                    : "border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-700"
+                }`}
+                title={subtask.url ? "Edit hyperlink" : "Add hyperlink"}
+                aria-label={`${subtask.url ? "Edit" : "Add"} hyperlink for ${subtask.title}`}
+              >
+                ↗
+              </button>
+              <button
+                onClick={() => onDeleteSubtask(task.id, subtask.id)}
+                className="px-1 text-sm text-gray-300 hover:text-red-500"
+                title="Delete subtask"
+                aria-label={`Delete subtask ${subtask.title}`}
+              >
+                ✕
+              </button>
+            </div>
+
+            {editingLinkId === subtask.id && (
+              <div className="flex gap-2 pl-5">
+                <input
+                  className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
+                  placeholder="https://example.com"
+                  value={subtaskUrlInput}
+                  autoFocus
+                  onChange={e => setSubtaskUrlInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === "Enter") saveSubtaskUrl(subtask.id)
+                    if (e.key === "Escape") {
+                      setEditingLinkId(null)
+                      setSubtaskUrlInput("")
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => saveSubtaskUrl(subtask.id)}
+                  className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
+                  aria-label={`Save hyperlink for ${subtask.title}`}
+                >
+                  Save
+                </button>
+                {subtask.url && (
+                  <button
+                    onClick={() => {
+                      onUpdateSubtaskUrl(task.id, subtask.id, "")
+                      setEditingLinkId(null)
+                      setSubtaskUrlInput("")
+                    }}
+                    className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 sm:text-sm"
+                    aria-label={`Remove hyperlink for ${subtask.title}`}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         ))}
 
-        <div className="flex gap-2 pl-8">
-          <input
-            className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
-            placeholder="Add subtask"
-            value={subtaskInput}
-            onChange={e => setSubtaskInput(e.target.value)}
-            onKeyDown={e => e.key === "Enter" && handleAddSubtask()}
-          />
-          <button
-            onClick={handleAddSubtask}
-            className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
-            aria-label={`Add subtask to ${task.title}`}
-          >
-            Add
-          </button>
-        </div>
+        {addingSubtask && (
+          <div className="flex gap-2 pl-8">
+            <input
+              className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
+              placeholder="Add subtask"
+              value={subtaskInput}
+              autoFocus
+              onChange={e => setSubtaskInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === "Enter") handleAddSubtask()
+                if (e.key === "Escape") {
+                  setSubtaskInput("")
+                  setAddingSubtask(false)
+                }
+              }}
+            />
+            <button
+              onClick={handleAddSubtask}
+              className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
+              aria-label={`Save subtask to ${task.title}`}
+            >
+              Add
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
