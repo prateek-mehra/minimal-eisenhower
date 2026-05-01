@@ -217,7 +217,7 @@ export default function App() {
   const hasClientId = Boolean(GOOGLE_CLIENT_ID)
   const helperText = isDesktop
     ? "Tap the task prompt to add, tap a task to show or hide subtasks, drag a task to move it, and use the side buttons to complete or delete."
-    : "Tap the task prompt to add, drag by the grip to reorder, swipe right to complete, and hold before dragging left to reveal delete."
+    : "Tap the task prompt to add, drag by the grip to reorder, swipe right to complete, and swipe left to delete."
 
   const sortedTasks = useMemo(
     () =>
@@ -964,6 +964,26 @@ export default function App() {
                 {helperText}
               </p>
               {!isGuest && syncError && <p className="mt-2 text-xs text-red-500">{syncError}</p>}
+              {!isGuest && (
+                <div className="mt-3 flex items-center gap-2 sm:hidden">
+                  <span className="rounded-full bg-white/75 px-3 py-1 text-[11px] text-gray-500 shadow-sm">
+                    {syncStatus === "syncing"
+                      ? "Syncing..."
+                      : syncStatus === "ready"
+                        ? "Synced"
+                        : "Local only"}
+                  </span>
+
+                  {syncStatus !== "ready" && (
+                    <button
+                      onClick={() => syncFromCloud({ interactive: true })}
+                      className="rounded-full bg-white px-3 py-2 text-xs text-gray-600 shadow-sm transition hover:bg-gray-50"
+                    >
+                      Enable cloud sync
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex items-center gap-3">
@@ -1588,7 +1608,6 @@ function SortableTask({
   const [subtaskInput, setSubtaskInput] = useState("")
   const [subtasksExpanded, setSubtasksExpanded] = useState(false)
   const [addingSubtask, setAddingSubtask] = useState(false)
-  const [deleteRevealed, setDeleteRevealed] = useState(false)
   const [taskMenuOpen, setTaskMenuOpen] = useState(false)
   const [editingTaskTitle, setEditingTaskTitle] = useState(false)
   const [editingTaskLink, setEditingTaskLink] = useState(false)
@@ -1601,10 +1620,7 @@ function SortableTask({
   const [subtaskUrlInput, setSubtaskUrlInput] = useState("")
   const [rowSwipeOffset, setRowSwipeOffset] = useState(0)
   const [subtaskSwipeOffsets, setSubtaskSwipeOffsets] = useState({})
-  const deletePressTimerRef = useRef(null)
-  const deleteStartXRef = useRef(0)
-  const deleteStartYRef = useRef(0)
-  const deleteHoldReadyRef = useRef(false)
+  const rowSwipeStateRef = useRef(null)
   const shouldSuppressClickRef = useRef(false)
   const subtaskSwipeStateRef = useRef({})
   const {
@@ -1628,6 +1644,7 @@ function SortableTask({
   const completedSubtasks = subtasks.filter(subtask => subtask.completed).length
   const hasIncompleteSubtasks = subtasks.some(subtask => !subtask.completed)
   const taskLocked = hasIncompleteSubtasks
+  const taskDeletable = !hasIncompleteSubtasks
   const hasSubtasks = subtasks.length > 0
   const subtaskCompletionPercent = hasSubtasks
     ? Math.round((completedSubtasks / subtasks.length) * 100)
@@ -1635,13 +1652,6 @@ function SortableTask({
 
   const toggleSubtasksExpanded = () => {
     setSubtasksExpanded(expanded => !expanded)
-  }
-
-  const clearDeleteTimer = () => {
-    if (deletePressTimerRef.current) {
-      clearTimeout(deletePressTimerRef.current)
-      deletePressTimerRef.current = null
-    }
   }
 
   const handleAddSubtask = () => {
@@ -1696,57 +1706,52 @@ function SortableTask({
       return
     }
 
-    deleteStartXRef.current = event.clientX
-    deleteStartYRef.current = event.clientY
-    deleteHoldReadyRef.current = false
+    rowSwipeStateRef.current = {
+      startX: event.clientX,
+      startY: event.clientY,
+      offset: 0,
+    }
     shouldSuppressClickRef.current = false
-    clearDeleteTimer()
-    deletePressTimerRef.current = setTimeout(() => {
-      deleteHoldReadyRef.current = true
-      deletePressTimerRef.current = null
-    }, 260)
   }
 
   const handleRowPointerMove = (event) => {
     if (isDesktop) return
-    const deltaX = event.clientX - deleteStartXRef.current
-    const deltaY = event.clientY - deleteStartYRef.current
+    const state = rowSwipeStateRef.current
+    if (!state) return
+
+    const deltaX = event.clientX - state.startX
+    const deltaY = event.clientY - state.startY
 
     if (Math.abs(deltaY) > 18 && Math.abs(deltaY) > Math.abs(deltaX)) {
-      clearDeleteTimer()
+      state.offset = 0
       setRowSwipeOffset(0)
       return
     }
 
     if (deltaX > 0) {
-      clearDeleteTimer()
-      if (!taskLocked) {
-        setDeleteRevealed(false)
-        setRowSwipeOffset(clamp(deltaX, 0, 92))
-        if (deltaX > 8) shouldSuppressClickRef.current = true
-      }
+      state.offset = clamp(deltaX, 0, 92)
+      setRowSwipeOffset(state.offset)
+      if (deltaX > 8) shouldSuppressClickRef.current = true
       return
     }
 
     if (deltaX < 0) {
-      if (deleteHoldReadyRef.current) {
-        setRowSwipeOffset(clamp(deltaX, -72, 0))
-        if (Math.abs(deltaX) > 8) shouldSuppressClickRef.current = true
-      } else if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
-        clearDeleteTimer()
-      }
+      state.offset = clamp(deltaX, -92, 0)
+      setRowSwipeOffset(state.offset)
+      if (Math.abs(deltaX) > 8) shouldSuppressClickRef.current = true
     }
   }
 
   const handleRowPointerEnd = () => {
     if (isDesktop) return
-    clearDeleteTimer()
-    if (rowSwipeOffset >= 72 && !taskLocked) {
+    const offset = rowSwipeStateRef.current?.offset || 0
+    rowSwipeStateRef.current = null
+
+    if (offset >= 72) {
       onToggle(task.id)
-    } else if (rowSwipeOffset <= -52 && deleteHoldReadyRef.current) {
-      setDeleteRevealed(true)
+    } else if (offset <= -72 && taskDeletable) {
+      onDelete(task.id)
     }
-    deleteHoldReadyRef.current = false
     setRowSwipeOffset(0)
   }
 
@@ -1771,7 +1776,7 @@ function SortableTask({
       return 0
     }
 
-    state.offset = clamp(deltaX, 0, 84)
+    state.offset = clamp(deltaX, -84, 84)
     setSubtaskSwipeOffsets(current => ({ ...current, [subtaskId]: state.offset }))
     return state.offset
   }
@@ -1779,38 +1784,24 @@ function SortableTask({
   const endSubtaskSwipe = (subtask) => {
     const state = subtaskSwipeStateRef.current[subtask.id]
     const shouldToggle = state?.offset >= 64
+    const shouldDelete = state?.offset <= -64
     delete subtaskSwipeStateRef.current[subtask.id]
     setSubtaskSwipeOffsets(current => ({ ...current, [subtask.id]: 0 }))
     if (shouldToggle) {
       onToggleSubtask(task.id, subtask.id)
+    } else if (shouldDelete) {
+      onDeleteSubtask(task.id, subtask.id)
     }
     return 0
   }
 
   return (
     <div ref={setNodeRef} style={style} className="relative text-sm sm:text-base">
-      <button
-        type="button"
-        onClick={() => onDelete(task.id)}
-        className={`absolute inset-y-0 right-0 flex w-14 items-center justify-center rounded-2xl bg-red-500/12 text-red-500 transition md:hidden ${
-          deleteRevealed ? "opacity-100" : "pointer-events-none opacity-0"
-        }`}
-        aria-label={`Delete ${task.title}`}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
-          <path d="M9 3.75h6l.6 1.5H19.5v1.5h-15v-1.5h3.9ZM7.5 9h1.5v8.25H7.5Zm4.5 0h1.5v8.25H12Zm4.5 0H18v8.25h-1.5ZM6 6.75h12v12A2.25 2.25 0 0 1 15.75 21h-7.5A2.25 2.25 0 0 1 6 18.75Z" />
-        </svg>
-      </button>
-
       <div
-        className="relative rounded-2xl bg-white/75"
+        className="relative overflow-hidden rounded-2xl bg-white/75"
         onClick={() => {
           if (shouldSuppressClickRef.current) {
             shouldSuppressClickRef.current = false
-            return
-          }
-          if (deleteRevealed) {
-            setDeleteRevealed(false)
             return
           }
           setTaskMenuOpen(false)
@@ -1825,13 +1816,19 @@ function SortableTask({
         >
           Done
         </div>
+        <div
+          className={`pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-[11px] font-medium uppercase tracking-[0.14em] transition ${
+            rowSwipeOffset < -16 ? "opacity-100" : "opacity-0"
+          } ${taskDeletable ? "text-rose-600" : "text-gray-400"} md:hidden`}
+        >
+          {taskDeletable ? "Delete" : "Finish subtasks"}
+        </div>
 
         <div
           className="px-3 py-3 transition"
           style={{
-            transform: `translateX(${
-              isDesktop ? 0 : rowSwipeOffset + (deleteRevealed ? -48 : 0)
-            }px)`,
+            transform: `translateX(${isDesktop ? 0 : rowSwipeOffset}px)`,
+            touchAction: isDesktop ? "auto" : "pan-y",
           }}
           onPointerDown={handleRowPointerDown}
           onPointerMove={handleRowPointerMove}
@@ -1879,9 +1876,12 @@ function SortableTask({
                   type="button"
                   onClick={e => {
                     e.stopPropagation()
+                    if (shouldSuppressClickRef.current) {
+                      shouldSuppressClickRef.current = false
+                      return
+                    }
                     toggleSubtasksExpanded()
                   }}
-                  onPointerDown={e => e.stopPropagation()}
                   className="flex min-w-0 w-full items-center gap-1.5 rounded-xl text-left"
                   aria-expanded={subtasksExpanded}
                   {...desktopDragProps}
@@ -2001,11 +2001,18 @@ function SortableTask({
                   >
                     Done
                   </div>
+                  <div
+                    className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-[10px] font-medium uppercase tracking-[0.16em] text-rose-600 opacity-0 transition md:hidden"
+                    style={{ opacity: (subtaskSwipeOffsets[subtask.id] || 0) < -14 ? 1 : 0 }}
+                  >
+                    Delete
+                  </div>
 
                   <div
                     className="flex items-center gap-2 rounded-xl py-1.5 text-xs sm:text-sm"
                     style={{
                       transform: `translateX(${isDesktop ? 0 : subtaskSwipeOffsets[subtask.id] || 0}px)`,
+                      touchAction: isDesktop ? "auto" : "pan-y",
                     }}
                     onPointerDown={e => {
                       if (!isDesktop) startSubtaskSwipe(subtask.id, e)
