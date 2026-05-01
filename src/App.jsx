@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react"
+import { createPortal } from "react-dom"
 import {
   DndContext,
   closestCenter,
@@ -32,10 +33,30 @@ const DRIVE_UPLOAD_API = "https://www.googleapis.com/upload/drive/v3/files"
 const SYNC_FILE_NAME = "eisenhower-tasks.json"
 
 const QUADRANTS = [
-  { id: "UI", title: "Urgent & Important", subtitle: "Do first" },
-  { id: "NI", title: "Not Urgent & Important", subtitle: "Schedule" },
-  { id: "UN", title: "Urgent & Not Important", subtitle: "Delegate" },
-  { id: "NN", title: "Not Urgent & Not Important", subtitle: "Eliminate" },
+  {
+    id: "UI",
+    title: "Do First",
+    subtitle: "Urgent & Important",
+    tone: "dominant",
+  },
+  {
+    id: "NI",
+    title: "Schedule",
+    subtitle: "Not Urgent & Important",
+    tone: "balanced",
+  },
+  {
+    id: "UN",
+    title: "Delegate",
+    subtitle: "Urgent & Not Important",
+    tone: "balanced",
+  },
+  {
+    id: "NN",
+    title: "Eliminate",
+    subtitle: "Not Urgent & Not Important",
+    tone: "muted",
+  },
 ]
 
 const VALID_QUADRANTS = new Set(QUADRANTS.map(q => q.id))
@@ -88,6 +109,7 @@ const normalizeTask = (task, fallbackOrder = 0) => {
   return {
     id: task?.id || generateId(),
     title: typeof task?.title === "string" ? task.title : "",
+    url: typeof task?.url === "string" ? task.url : "",
     quadrant: safeQuadrant,
     completed: Boolean(task?.completed),
     subtasks: normalizeSubtasks(task?.subtasks),
@@ -125,6 +147,33 @@ const toSignature = (taskList) =>
       })
   )
 
+const DESKTOP_MEDIA_QUERY = "(min-width: 768px)"
+
+function useIsDesktop() {
+  const [isDesktop, setIsDesktop] = useState(() => {
+    if (typeof window === "undefined") return false
+    return window.matchMedia(DESKTOP_MEDIA_QUERY).matches
+  })
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined
+
+    const media = window.matchMedia(DESKTOP_MEDIA_QUERY)
+    const handleChange = () => setIsDesktop(media.matches)
+    handleChange()
+
+    if (media.addEventListener) {
+      media.addEventListener("change", handleChange)
+      return () => media.removeEventListener("change", handleChange)
+    }
+
+    media.addListener(handleChange)
+    return () => media.removeListener(handleChange)
+  }, [])
+
+  return isDesktop
+}
+
 export default function App() {
   const [tasks, setTasks] = useState([])
   const [user, setUser] = useState(() => {
@@ -158,11 +207,17 @@ export default function App() {
   const [tokenExpiry, setTokenExpiry] = useState(0)
   const [syncStatus, setSyncStatus] = useState("idle")
   const [syncError, setSyncError] = useState("")
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef(null)
+  const isDesktop = useIsDesktop()
 
   const isGuest = user?.mode === "guest"
   const userEmail = user?.email || ""
   const storageIdentity = isGuest ? GUEST_EMAIL : userEmail
   const hasClientId = Boolean(GOOGLE_CLIENT_ID)
+  const helperText = isDesktop
+    ? "Tap the task prompt to add, tap a task to show or hide subtasks, drag a task to move it, and use the side buttons to complete or delete."
+    : "Tap the task prompt to add, drag by the grip to reorder, swipe right to complete, and hold before dragging left to reveal delete."
 
   const sortedTasks = useMemo(
     () =>
@@ -185,6 +240,19 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(GUEST_NAME_KEY, getGuestName(guestName))
   }, [guestName])
+
+  useEffect(() => {
+    if (!menuOpen) return
+
+    const handlePointerDown = (event) => {
+      if (!menuRef.current?.contains(event.target)) {
+        setMenuOpen(false)
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown)
+    return () => document.removeEventListener("pointerdown", handlePointerDown)
+  }, [menuOpen])
 
   useEffect(() => {
     if (!storageIdentity) {
@@ -619,6 +687,7 @@ export default function App() {
       const newTask = {
         id: generateId(),
         title,
+        url: "",
         quadrant,
         completed: false,
         subtasks: [],
@@ -645,6 +714,16 @@ export default function App() {
       prev.map(task =>
         task.id === id
           ? { ...task, title: nextTitle, updatedAt: Date.now() }
+          : task
+      )
+    )
+  }
+
+  const updateTaskUrl = (id, url) => {
+    setTasks(prev =>
+      prev.map(task =>
+        task.id === id
+          ? { ...task, url: url.trim(), updatedAt: Date.now() }
           : task
       )
     )
@@ -873,54 +952,24 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-[100dvh] bg-gray-50 px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6">
-      <div className="mx-auto w-full max-w-5xl">
-        <div className="sticky top-0 z-10 -mx-4 mb-4 bg-gray-50/95 px-4 pb-3 pt-4 backdrop-blur sm:static sm:mx-0 sm:mb-6 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0">
-          <div className="flex items-center justify-between gap-3">
-            <h1 className="text-xl font-semibold sm:text-2xl">Eisenhower Matrix</h1>
+    <div className="min-h-[100dvh] bg-[linear-gradient(180deg,_#f8fafc_0%,_#eef2f7_100%)] px-4 pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:p-6 md:h-[100dvh] md:overflow-hidden">
+      <div className="mx-auto w-full max-w-6xl md:flex md:h-full md:flex-col">
+        <div className="sticky top-0 z-10 -mx-4 mb-4 bg-[linear-gradient(180deg,_rgba(248,250,252,0.96)_0%,_rgba(248,250,252,0.82)_100%)] px-4 pb-3 pt-4 backdrop-blur sm:static sm:mx-0 sm:mb-6 sm:bg-transparent sm:px-0 sm:pb-0 sm:pt-0 md:shrink-0">
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <h1 className="text-xl font-semibold text-gray-900 sm:text-2xl">
+                Eisenhower Matrix
+              </h1>
+              <p className="text-xs text-gray-500 sm:text-sm">
+                {helperText}
+              </p>
+              {!isGuest && syncError && <p className="mt-2 text-xs text-red-500">{syncError}</p>}
+            </div>
 
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-2 rounded-full border border-gray-200 bg-white px-2 py-1 text-xs sm:text-sm">
-                {user.picture ? (
-                  <img
-                    src={user.picture}
-                    alt={`${user.name} avatar`}
-                    className="h-6 w-6 rounded-full"
-                    referrerPolicy="no-referrer"
-                  />
-                ) : (
-                  <span className="grid h-6 w-6 place-items-center rounded-full bg-gray-200 text-[11px] font-semibold text-gray-600">
-                    {user.name.slice(0, 1).toUpperCase()}
-                  </span>
-                )}
-                <span className="hidden sm:inline">{user.name}</span>
-                <button
-                  onClick={() => {
-                    if (!isGuest && accessToken && window.google?.accounts?.oauth2?.revoke) {
-                      window.google.accounts.oauth2.revoke(accessToken, () => {})
-                    }
-                    setUser(null)
-                    setAccessToken(null)
-                    setTokenExpiry(0)
-                    setTasks([])
-                    setSyncStatus("idle")
-                    setSyncError("")
-                    if (!isGuest && user?.email) {
-                      localStorage.removeItem(getUserTokenStorageKey(user.email))
-                    }
-                    if (!isGuest && window.google?.accounts?.id) {
-                      window.google.accounts.id.disableAutoSelect()
-                    }
-                  }}
-                  className="rounded-full px-2 py-1 text-xs text-gray-600 hover:text-gray-900"
-                >
-                  {isGuest ? "Exit guest mode" : "Sign out"}
-                </button>
-              </div>
-
+            <div className="flex items-center gap-3">
               {!isGuest && (
-                <>
-                  <span className="text-[11px] text-gray-500 sm:text-xs">
+                <div className="hidden items-center gap-2 sm:flex">
+                  <span className="rounded-full bg-white/75 px-3 py-1 text-[11px] text-gray-500 shadow-sm">
                     {syncStatus === "syncing"
                       ? "Syncing..."
                       : syncStatus === "ready"
@@ -931,26 +980,62 @@ export default function App() {
                   {syncStatus !== "ready" && (
                     <button
                       onClick={() => syncFromCloud({ interactive: true })}
-                      className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
+                      className="rounded-full bg-white px-3 py-2 text-xs text-gray-600 shadow-sm transition hover:bg-gray-50"
                     >
                       Enable cloud sync
                     </button>
                   )}
-                </>
+                </div>
               )}
 
-              <button
-                onClick={clearCompleted}
-                className="text-xs sm:text-sm px-3 py-2 rounded-md border border-gray-300 hover:bg-gray-100"
-              >
-                Clear completed
-              </button>
+              <div className="relative" ref={menuRef}>
+                <button
+                  onClick={() => setMenuOpen(open => !open)}
+                  className="grid h-10 w-10 place-items-center rounded-full bg-white/90 text-sm font-semibold text-gray-700 shadow-sm transition hover:bg-white"
+                  aria-label="Open menu"
+                >
+                  {user.name.slice(0, 1).toUpperCase()}
+                </button>
+
+                {menuOpen && (
+                  <div className="absolute right-0 top-12 z-20 min-w-48 rounded-2xl bg-white p-2 shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
+                    <button
+                      onClick={() => {
+                        clearCompleted()
+                        setMenuOpen(false)
+                      }}
+                      className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50"
+                    >
+                      Clear completed
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (!isGuest && accessToken && window.google?.accounts?.oauth2?.revoke) {
+                          window.google.accounts.oauth2.revoke(accessToken, () => {})
+                        }
+                        setUser(null)
+                        setAccessToken(null)
+                        setTokenExpiry(0)
+                        setTasks([])
+                        setSyncStatus("idle")
+                        setSyncError("")
+                        setMenuOpen(false)
+                        if (!isGuest && user?.email) {
+                          localStorage.removeItem(getUserTokenStorageKey(user.email))
+                        }
+                        if (!isGuest && window.google?.accounts?.id) {
+                          window.google.accounts.id.disableAutoSelect()
+                        }
+                      }}
+                      className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50"
+                    >
+                      {isGuest ? "Exit guest mode" : "Sign out"}
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-          {!isGuest && syncError && <p className="mt-1 text-xs text-red-500">{syncError}</p>}
-          <p className="mt-1 text-xs text-gray-500 sm:text-sm">
-            Tap and hold to drag, or scroll each quadrant to view more tasks.
-          </p>
         </div>
 
         <DndContext
@@ -958,15 +1043,17 @@ export default function App() {
           collisionDetection={closestCenter}
           onDragEnd={handleDragEnd}
         >
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 md:grid-rows-2 md:h-[80vh]">
+          <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-2 md:grid-rows-2">
             {QUADRANTS.map(q => (
               <Quadrant
                 key={q.id}
                 quadrant={q}
                 tasks={sortedTasks.filter(t => t.quadrant === q.id)}
+                isDesktop={isDesktop}
                 onAddTask={addTask}
                 onToggleTask={toggleTask}
                 onUpdateTaskTitle={updateTaskTitle}
+                onUpdateTaskUrl={updateTaskUrl}
                 onAddSubtask={addSubtask}
                 onToggleSubtask={toggleSubtask}
                 onUpdateSubtaskTitle={updateSubtaskTitle}
@@ -978,7 +1065,7 @@ export default function App() {
           </div>
         </DndContext>
 
-        <AppFooter className="mt-6" />
+        <AppFooter className="mt-8 md:mt-4 md:shrink-0" />
       </div>
     </div>
   )
@@ -1122,9 +1209,11 @@ function decodeJwt(token) {
 function Quadrant({
   quadrant,
   tasks,
+  isDesktop,
   onAddTask,
   onToggleTask,
   onUpdateTaskTitle,
+  onUpdateTaskUrl,
   onAddSubtask,
   onToggleSubtask,
   onUpdateSubtaskTitle,
@@ -1133,6 +1222,7 @@ function Quadrant({
   onDeleteTask,
 }) {
   const [input, setInput] = useState("")
+  const [addingTask, setAddingTask] = useState(false)
 
   const { setNodeRef } = useDroppable({
     id: quadrant.id,
@@ -1140,15 +1230,50 @@ function Quadrant({
   })
 
   const handleAdd = () => {
+    if (!input.trim()) return
     onAddTask(input, quadrant.id)
     setInput("")
+    setAddingTask(false)
   }
 
+  const toneClasses = {
+    dominant: "bg-white/82 shadow-[0_14px_34px_rgba(225,29,72,0.06)]",
+    balanced: "bg-white/78 shadow-[0_14px_34px_rgba(15,23,42,0.05)]",
+    muted:
+      "bg-slate-100/78 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] opacity-85",
+  }
+
+  const headingClasses =
+    quadrant.tone === "dominant" ? "text-rose-700" : "text-gray-900"
+  const subtitleClasses =
+    quadrant.tone === "dominant" ? "text-rose-500" : "text-gray-500"
+  const countClasses =
+    quadrant.tone === "dominant"
+      ? "text-rose-400"
+      : "text-gray-400"
+
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-4 flex flex-col md:min-h-[16rem]">
-      <div className="mb-3">
-        <h2 className="text-sm font-semibold sm:text-base">{quadrant.title}</h2>
-        <p className="text-xs text-gray-500 sm:text-sm">{quadrant.subtitle}</p>
+    <div
+      className={`flex flex-col rounded-[28px] p-4 md:min-h-[18rem] ${
+        toneClasses[quadrant.tone]
+      } md:min-h-0`}
+    >
+      <div className="mb-4 border-b border-white/70 pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2
+            className={`font-semibold ${
+              quadrant.tone === "dominant"
+                ? "text-base sm:text-lg"
+                : "text-sm sm:text-base"
+            } ${headingClasses}`}
+          >
+            {quadrant.title}
+          </h2>
+          <span className={`text-[11px] uppercase tracking-[0.18em] ${countClasses}`}>
+            {tasks.length}
+          </span>
+        </div>
+        <p className={`mt-1 text-xs sm:text-sm ${subtitleClasses}`}>{quadrant.subtitle}</p>
       </div>
 
       <SortableContext
@@ -1157,14 +1282,16 @@ function Quadrant({
       >
         <div
           ref={setNodeRef}
-          className="flex-1 space-y-2 overflow-auto overscroll-contain"
+          className="flex-1 space-y-2 overflow-auto overscroll-contain pr-1 md:min-h-0"
         >
           {tasks.map(task => (
             <SortableTask
               key={task.id}
               task={task}
+              isDesktop={isDesktop}
               onToggle={onToggleTask}
               onUpdateTaskTitle={onUpdateTaskTitle}
+              onUpdateTaskUrl={onUpdateTaskUrl}
               onAddSubtask={onAddSubtask}
               onToggleSubtask={onToggleSubtask}
               onUpdateSubtaskTitle={onUpdateSubtaskTitle}
@@ -1176,30 +1303,281 @@ function Quadrant({
         </div>
       </SortableContext>
 
-      <div className="mt-3 flex gap-2">
-        <input
-          className="flex-1 rounded-md border px-3 py-2 text-sm sm:text-base"
-          placeholder="Add task"
-          value={input}
-          onChange={e => setInput(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && handleAdd()}
-        />
-        <button
-          onClick={handleAdd}
-          className="px-4 py-2 border rounded-md text-sm sm:text-base"
-          aria-label={`Add task to ${quadrant.title}`}
-        >
-          Add
-        </button>
+      <div className="mt-3">
+        {addingTask ? (
+          <input
+            className="w-full rounded-2xl bg-white/85 px-3 py-3 text-sm text-gray-800 outline-none ring-1 ring-black/5 transition focus:bg-white focus:ring-2 focus:ring-emerald-100"
+            placeholder="+ add task..."
+            value={input}
+            autoFocus
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === "Enter") handleAdd()
+              if (e.key === "Escape") {
+                setInput("")
+                setAddingTask(false)
+              }
+            }}
+            onBlur={() => {
+              if (!input.trim()) {
+                setAddingTask(false)
+              }
+            }}
+          />
+        ) : (
+          <button
+            onClick={() => setAddingTask(true)}
+            className="w-full rounded-2xl px-1 py-3 text-left text-sm text-gray-400 transition hover:text-gray-600"
+            aria-label={`Add task to ${quadrant.title}`}
+          >
+            + add task...
+          </button>
+        )}
       </div>
+    </div>
+  )
+}
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max)
+
+const normalizeUrl = (value) => {
+  const next = (value || "").trim()
+  if (!next) return ""
+  if (/^https?:\/\//i.test(next)) return next
+  return `https://${next}`
+}
+
+const openExternalLink = (url) => {
+  const normalized = normalizeUrl(url)
+  if (!normalized) return
+  window.open(normalized, "_blank", "noopener,noreferrer")
+}
+
+function DragGrip({ attributes, listeners }) {
+  const stopRowGesture = (event) => {
+    event.stopPropagation()
+  }
+
+  const startPointerDrag = (event) => {
+    listeners?.onPointerDown?.(event)
+    event.stopPropagation()
+  }
+
+  const startTouchDrag = (event) => {
+    listeners?.onTouchStart?.(event)
+    event.stopPropagation()
+  }
+
+  return (
+    <button
+      type="button"
+      {...attributes}
+      {...listeners}
+      onClick={e => e.stopPropagation()}
+      onPointerDown={startPointerDrag}
+      onPointerMove={stopRowGesture}
+      onPointerUp={stopRowGesture}
+      onPointerCancel={stopRowGesture}
+      onTouchStart={startTouchDrag}
+      onTouchMove={stopRowGesture}
+      onTouchEnd={stopRowGesture}
+      onTouchCancel={stopRowGesture}
+      style={{ touchAction: "none" }}
+      className="grid h-7 w-7 shrink-0 place-items-center rounded-full text-gray-300 transition hover:bg-white/70 hover:text-gray-500"
+      title="Drag task"
+      aria-label="Drag task"
+    >
+      <span className="grid grid-cols-2 gap-0.5">
+        {Array.from({ length: 6 }).map((_, index) => (
+          <span key={index} className="h-1 w-1 rounded-full bg-current" />
+        ))}
+      </span>
+    </button>
+  )
+}
+
+function ActionButton({
+  color,
+  icon,
+  label,
+  onClick,
+  disabled = false,
+  active = false,
+  className = "",
+}) {
+  const toneClasses =
+    color === "green"
+      ? active
+        ? "bg-emerald-500 text-white hover:bg-emerald-500"
+        : "bg-white text-emerald-600 ring-1 ring-emerald-200 hover:bg-emerald-50"
+      : "bg-rose-50 text-rose-600 hover:bg-rose-100"
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onPointerDown={e => e.stopPropagation()}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+      className={`grid h-7 w-7 shrink-0 place-items-center rounded-full transition ${toneClasses} ${
+        disabled ? "cursor-not-allowed opacity-35" : ""
+      } ${className}`.trim()}
+    >
+      {icon === "check" ? (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5" fill="none">
+          <path
+            d="M3.5 8.2 6.6 11.2 12.5 4.8"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      ) : (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5" fill="none">
+          <path d="M4 4 12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+          <path d="M12 4 4 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      )}
+    </button>
+  )
+}
+
+function LaunchLinkButton({ url, label }) {
+  if (!url) return null
+
+  return (
+    <button
+      type="button"
+      onClick={e => {
+        e.stopPropagation()
+        openExternalLink(url)
+      }}
+      onPointerDown={e => e.stopPropagation()}
+      className="grid h-6 w-6 shrink-0 place-items-center rounded-full text-gray-400 transition hover:bg-white/70 hover:text-gray-700"
+      title={label}
+      aria-label={label}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true" className="h-3.5 w-3.5 stroke-current" fill="none">
+        <path d="M14 5h5v5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M10 14 19 5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M19 13v4a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h4" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    </button>
+  )
+}
+
+function EditMenu({ open, onToggle, onRename, onEditLink, hasLink, label }) {
+  const buttonRef = useRef(null)
+  const [menuPosition, setMenuPosition] = useState(null)
+
+  const getMenuPosition = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect()
+    if (!rect) return null
+
+    const menuWidth = 128
+    const menuHeight = 96
+    const margin = 8
+    const topGap = 4
+    const hasRoomBelow = rect.bottom + topGap + menuHeight <= window.innerHeight - margin
+    const top = hasRoomBelow
+      ? rect.bottom + topGap
+      : Math.max(margin, rect.top - menuHeight - topGap)
+    const left = Math.min(
+      window.innerWidth - menuWidth - margin,
+      Math.max(margin, rect.right - menuWidth)
+    )
+
+    return { left, top }
+  }, [])
+
+  useEffect(() => {
+    if (!open) return undefined
+
+    const updateMenuPosition = () => {
+      const nextPosition = getMenuPosition()
+      if (nextPosition) setMenuPosition(nextPosition)
+    }
+
+    const animationFrame = requestAnimationFrame(updateMenuPosition)
+    window.addEventListener("resize", updateMenuPosition)
+    window.addEventListener("scroll", updateMenuPosition, true)
+
+    return () => {
+      cancelAnimationFrame(animationFrame)
+      window.removeEventListener("resize", updateMenuPosition)
+      window.removeEventListener("scroll", updateMenuPosition, true)
+    }
+  }, [getMenuPosition, open])
+
+  const menu =
+    open && menuPosition && typeof document !== "undefined"
+      ? createPortal(
+          <div
+            className="fixed z-[100] min-w-32 rounded-2xl border border-slate-200 bg-white p-1.5 shadow-[0_18px_40px_rgba(15,23,42,0.16)]"
+            style={{ left: menuPosition.left, top: menuPosition.top }}
+            onClick={e => e.stopPropagation()}
+            onPointerDown={e => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={e => {
+                e.stopPropagation()
+                onRename()
+              }}
+              className="w-full rounded-xl px-3 py-2 text-left text-xs text-gray-700 transition hover:bg-gray-50 sm:text-sm"
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={e => {
+                e.stopPropagation()
+                onEditLink()
+              }}
+              className="w-full rounded-xl px-3 py-2 text-left text-xs text-gray-700 transition hover:bg-gray-50 sm:text-sm"
+            >
+              {hasLink ? "Edit link" : "Add link"}
+            </button>
+          </div>,
+          document.body
+        )
+      : null
+
+  return (
+    <div className="relative z-20 shrink-0">
+      <button
+        ref={buttonRef}
+        type="button"
+        onClick={e => {
+          e.stopPropagation()
+          setMenuPosition(open ? null : getMenuPosition())
+          onToggle()
+        }}
+        onPointerDown={e => e.stopPropagation()}
+        className={`flex h-9 items-center gap-1.5 rounded-full border border-slate-300 bg-white px-2.5 text-gray-700 shadow-sm transition hover:border-slate-400 hover:bg-slate-50 ${
+          open ? "border-gray-300 text-gray-700" : ""
+        }`}
+        title={label}
+        aria-label={label}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-4 w-4 stroke-current" fill="none">
+          <path d="M4 20h4l9.8-9.8a1.5 1.5 0 0 0 0-2.1l-1.9-1.9a1.5 1.5 0 0 0-2.1 0L4 16v4Z" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="m12.5 7.5 4 4" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {menu}
     </div>
   )
 }
 
 function SortableTask({
   task,
+  isDesktop,
   onToggle,
   onUpdateTaskTitle,
+  onUpdateTaskUrl,
   onAddSubtask,
   onToggleSubtask,
   onUpdateSubtaskTitle,
@@ -1208,14 +1586,27 @@ function SortableTask({
   onDelete,
 }) {
   const [subtaskInput, setSubtaskInput] = useState("")
-  const [subtasksCollapsed, setSubtasksCollapsed] = useState(false)
+  const [subtasksExpanded, setSubtasksExpanded] = useState(false)
   const [addingSubtask, setAddingSubtask] = useState(false)
+  const [deleteRevealed, setDeleteRevealed] = useState(false)
+  const [taskMenuOpen, setTaskMenuOpen] = useState(false)
   const [editingTaskTitle, setEditingTaskTitle] = useState(false)
+  const [editingTaskLink, setEditingTaskLink] = useState(false)
   const [taskTitleInput, setTaskTitleInput] = useState(task.title)
+  const [taskUrlInput, setTaskUrlInput] = useState(task.url || "")
   const [editingSubtaskTitleId, setEditingSubtaskTitleId] = useState(null)
+  const [editingSubtaskLinkId, setEditingSubtaskLinkId] = useState(null)
+  const [subtaskMenuId, setSubtaskMenuId] = useState(null)
   const [subtaskTitleInput, setSubtaskTitleInput] = useState("")
-  const [editingLinkId, setEditingLinkId] = useState(null)
   const [subtaskUrlInput, setSubtaskUrlInput] = useState("")
+  const [rowSwipeOffset, setRowSwipeOffset] = useState(0)
+  const [subtaskSwipeOffsets, setSubtaskSwipeOffsets] = useState({})
+  const deletePressTimerRef = useRef(null)
+  const deleteStartXRef = useRef(0)
+  const deleteStartYRef = useRef(0)
+  const deleteHoldReadyRef = useRef(false)
+  const shouldSuppressClickRef = useRef(false)
+  const subtaskSwipeStateRef = useRef({})
   const {
     attributes,
     listeners,
@@ -1231,6 +1622,7 @@ function SortableTask({
     transform: CSS.Transform.toString(transform),
     transition,
   }
+  const desktopDragProps = isDesktop ? { ...attributes, ...listeners } : {}
 
   const subtasks = normalizeSubtasks(task.subtasks)
   const completedSubtasks = subtasks.filter(subtask => subtask.completed).length
@@ -1241,330 +1633,551 @@ function SortableTask({
     ? Math.round((completedSubtasks / subtasks.length) * 100)
     : 0
 
+  const toggleSubtasksExpanded = () => {
+    setSubtasksExpanded(expanded => !expanded)
+  }
+
+  const clearDeleteTimer = () => {
+    if (deletePressTimerRef.current) {
+      clearTimeout(deletePressTimerRef.current)
+      deletePressTimerRef.current = null
+    }
+  }
+
   const handleAddSubtask = () => {
     if (!subtaskInput.trim()) return
     onAddSubtask(task.id, subtaskInput)
     setSubtaskInput("")
-    setSubtasksCollapsed(false)
+    setSubtasksExpanded(true)
     setAddingSubtask(false)
   }
 
-  const showSubtaskEditor = (e) => {
-    e.stopPropagation()
-    setAddingSubtask(true)
-    setSubtasksCollapsed(false)
-  }
-
-  const showTaskTitleEditor = (e) => {
-    e.stopPropagation()
-    setTaskTitleInput(task.title)
-    setEditingTaskTitle(true)
-  }
-
   const saveTaskTitle = () => {
-    if (!taskTitleInput.trim()) {
+    const nextTitle = taskTitleInput.trim()
+    setEditingTaskTitle(false)
+    if (!nextTitle) {
       setTaskTitleInput(task.title)
-      setEditingTaskTitle(false)
       return
     }
-    onUpdateTaskTitle(task.id, taskTitleInput)
-    setEditingTaskTitle(false)
+    onUpdateTaskTitle(task.id, nextTitle)
   }
 
-  const showSubtaskTitleEditor = (subtask) => {
-    setSubtaskTitleInput(subtask.title)
-    setEditingSubtaskTitleId(subtask.id)
+  const saveTaskUrl = () => {
+    onUpdateTaskUrl(task.id, normalizeUrl(taskUrlInput))
+    setEditingTaskLink(false)
   }
 
   const saveSubtaskTitle = (subtaskId) => {
-    if (!subtaskTitleInput.trim()) {
-      setEditingSubtaskTitleId(null)
+    const nextTitle = subtaskTitleInput.trim()
+    setEditingSubtaskTitleId(null)
+    if (!nextTitle) {
       setSubtaskTitleInput("")
       return
     }
-    onUpdateSubtaskTitle(task.id, subtaskId, subtaskTitleInput)
-    setEditingSubtaskTitleId(null)
+    onUpdateSubtaskTitle(task.id, subtaskId, nextTitle)
     setSubtaskTitleInput("")
   }
 
-  const showLinkEditor = (subtask) => {
-    setEditingLinkId(subtask.id)
-    setSubtaskUrlInput(subtask.url || "")
-    setSubtasksCollapsed(false)
-  }
-
   const saveSubtaskUrl = (subtaskId) => {
-    onUpdateSubtaskUrl(task.id, subtaskId, subtaskUrlInput)
-    setEditingLinkId(null)
+    onUpdateSubtaskUrl(task.id, subtaskId, normalizeUrl(subtaskUrlInput))
+    setEditingSubtaskLinkId(null)
     setSubtaskUrlInput("")
   }
 
-  const toggleSubtasksCollapsed = () => {
-    if (hasSubtasks) setSubtasksCollapsed(collapsed => !collapsed)
+  const handleRowPointerDown = (event) => {
+    if (isDesktop) return
+    if (
+      editingTaskTitle ||
+      editingTaskLink ||
+      addingSubtask ||
+      editingSubtaskTitleId ||
+      editingSubtaskLinkId
+    ) {
+      return
+    }
+
+    deleteStartXRef.current = event.clientX
+    deleteStartYRef.current = event.clientY
+    deleteHoldReadyRef.current = false
+    shouldSuppressClickRef.current = false
+    clearDeleteTimer()
+    deletePressTimerRef.current = setTimeout(() => {
+      deleteHoldReadyRef.current = true
+      deletePressTimerRef.current = null
+    }, 260)
+  }
+
+  const handleRowPointerMove = (event) => {
+    if (isDesktop) return
+    const deltaX = event.clientX - deleteStartXRef.current
+    const deltaY = event.clientY - deleteStartYRef.current
+
+    if (Math.abs(deltaY) > 18 && Math.abs(deltaY) > Math.abs(deltaX)) {
+      clearDeleteTimer()
+      setRowSwipeOffset(0)
+      return
+    }
+
+    if (deltaX > 0) {
+      clearDeleteTimer()
+      if (!taskLocked) {
+        setDeleteRevealed(false)
+        setRowSwipeOffset(clamp(deltaX, 0, 92))
+        if (deltaX > 8) shouldSuppressClickRef.current = true
+      }
+      return
+    }
+
+    if (deltaX < 0) {
+      if (deleteHoldReadyRef.current) {
+        setRowSwipeOffset(clamp(deltaX, -72, 0))
+        if (Math.abs(deltaX) > 8) shouldSuppressClickRef.current = true
+      } else if (Math.abs(deltaX) > 10 || Math.abs(deltaY) > 10) {
+        clearDeleteTimer()
+      }
+    }
+  }
+
+  const handleRowPointerEnd = () => {
+    if (isDesktop) return
+    clearDeleteTimer()
+    if (rowSwipeOffset >= 72 && !taskLocked) {
+      onToggle(task.id)
+    } else if (rowSwipeOffset <= -52 && deleteHoldReadyRef.current) {
+      setDeleteRevealed(true)
+    }
+    deleteHoldReadyRef.current = false
+    setRowSwipeOffset(0)
+  }
+
+  const startSubtaskSwipe = (subtaskId, event) => {
+    subtaskSwipeStateRef.current[subtaskId] = {
+      startX: event.clientX,
+      startY: event.clientY,
+      offset: 0,
+    }
+    setSubtaskSwipeOffsets(current => ({ ...current, [subtaskId]: 0 }))
+  }
+
+  const moveSubtaskSwipe = (subtaskId, event) => {
+    const state = subtaskSwipeStateRef.current[subtaskId]
+    if (!state) return 0
+
+    const deltaX = event.clientX - state.startX
+    const deltaY = event.clientY - state.startY
+    if (Math.abs(deltaY) > 16 && Math.abs(deltaY) > Math.abs(deltaX)) {
+      state.offset = 0
+      setSubtaskSwipeOffsets(current => ({ ...current, [subtaskId]: 0 }))
+      return 0
+    }
+
+    state.offset = clamp(deltaX, 0, 84)
+    setSubtaskSwipeOffsets(current => ({ ...current, [subtaskId]: state.offset }))
+    return state.offset
+  }
+
+  const endSubtaskSwipe = (subtask) => {
+    const state = subtaskSwipeStateRef.current[subtask.id]
+    const shouldToggle = state?.offset >= 64
+    delete subtaskSwipeStateRef.current[subtask.id]
+    setSubtaskSwipeOffsets(current => ({ ...current, [subtask.id]: 0 }))
+    if (shouldToggle) {
+      onToggleSubtask(task.id, subtask.id)
+    }
+    return 0
   }
 
   return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className="group bg-white rounded-md border px-3 py-2 text-sm sm:text-base"
-    >
-      <div
-        {...attributes}
-        {...listeners}
-        className={`flex items-center gap-3 ${
-          hasSubtasks ? "cursor-pointer" : ""
+    <div ref={setNodeRef} style={style} className="relative text-sm sm:text-base">
+      <button
+        type="button"
+        onClick={() => onDelete(task.id)}
+        className={`absolute inset-y-0 right-0 flex w-14 items-center justify-center rounded-2xl bg-red-500/12 text-red-500 transition md:hidden ${
+          deleteRevealed ? "opacity-100" : "pointer-events-none opacity-0"
         }`}
-        onClick={toggleSubtasksCollapsed}
+        aria-label={`Delete ${task.title}`}
       >
-        <button
-          type="button"
-          onClick={e => {
-            e.stopPropagation()
-            toggleSubtasksCollapsed()
-          }}
-          className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-sm leading-none touch-none select-none ${
-            hasSubtasks
-              ? "cursor-pointer text-gray-500 hover:bg-gray-50 hover:text-gray-900"
-              : "cursor-default text-gray-200"
-          }`}
-          title={hasSubtasks ? "Show or hide subtasks" : "No subtasks"}
-          aria-label={hasSubtasks ? "Show or hide subtasks" : "No subtasks"}
-          aria-expanded={hasSubtasks ? !subtasksCollapsed : undefined}
+        <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+          <path d="M9 3.75h6l.6 1.5H19.5v1.5h-15v-1.5h3.9ZM7.5 9h1.5v8.25H7.5Zm4.5 0h1.5v8.25H12Zm4.5 0H18v8.25h-1.5ZM6 6.75h12v12A2.25 2.25 0 0 1 15.75 21h-7.5A2.25 2.25 0 0 1 6 18.75Z" />
+        </svg>
+      </button>
+
+      <div
+        className="relative rounded-2xl bg-white/75"
+        onClick={() => {
+          if (shouldSuppressClickRef.current) {
+            shouldSuppressClickRef.current = false
+            return
+          }
+          if (deleteRevealed) {
+            setDeleteRevealed(false)
+            return
+          }
+          setTaskMenuOpen(false)
+          setSubtaskMenuId(null)
+          toggleSubtasksExpanded()
+        }}
+      >
+        <div
+          className={`pointer-events-none absolute inset-y-0 left-0 flex items-center px-4 text-[11px] font-medium uppercase tracking-[0.14em] text-emerald-600 transition ${
+            rowSwipeOffset > 16 ? "opacity-100" : "opacity-0"
+          } md:hidden`}
         >
-          {hasSubtasks && !subtasksCollapsed ? "v" : ">"}
-        </button>
+          Done
+        </div>
 
-        <input
-          type="checkbox"
-          checked={task.completed}
-          onPointerDown={e => e.stopPropagation()}
-          onChange={() => {
-            if (!taskLocked) onToggle(task.id)
+        <div
+          className="px-3 py-3 transition"
+          style={{
+            transform: `translateX(${
+              isDesktop ? 0 : rowSwipeOffset + (deleteRevealed ? -48 : 0)
+            }px)`,
           }}
-          onClick={e => e.stopPropagation()}
-          disabled={taskLocked}
-          title={taskLocked ? "Complete all subtasks first" : "Complete task"}
-          className={`h-4 w-4 sm:h-5 sm:w-5 ${
-            taskLocked ? "cursor-not-allowed opacity-50" : "cursor-pointer"
-          }`}
-        />
-
-        {editingTaskTitle ? (
-          <input
-            className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-sm sm:text-base"
-            value={taskTitleInput}
-            autoFocus
-            onPointerDown={e => e.stopPropagation()}
-            onClick={e => e.stopPropagation()}
-            onChange={e => setTaskTitleInput(e.target.value)}
-            onKeyDown={e => {
-              e.stopPropagation()
-              if (e.key === "Enter") saveTaskTitle()
-              if (e.key === "Escape") {
-                setTaskTitleInput(task.title)
-                setEditingTaskTitle(false)
-              }
-            }}
-            onBlur={saveTaskTitle}
-            aria-label={`Rename ${task.title}`}
-          />
-        ) : (
-          <span className="min-w-0 flex-1 text-left">
-            <button
-              onClick={showTaskTitleEditor}
-              onPointerDown={e => e.stopPropagation()}
-              className={`inline-block max-w-full truncate align-bottom ${
-                task.completed ? "line-through text-gray-400" : ""
-              }`}
-              title="Rename task"
-              aria-label={`Rename ${task.title}`}
-            >
-              {task.title}
-            </button>
-          </span>
-        )}
-
-        {subtasks.length > 0 && (
-          <span
-            className="relative isolate h-5 min-w-11 shrink-0 overflow-hidden rounded-full border border-gray-200 bg-gray-100 px-2 text-center text-[11px] leading-5 text-gray-600"
-            aria-label={`${completedSubtasks} of ${subtasks.length} subtasks complete`}
-            title={`${subtaskCompletionPercent}% complete`}
-          >
-            <span
-              className="absolute inset-y-0 left-0 -z-10 bg-emerald-300 transition-[width] duration-200"
-              style={{ width: `${subtaskCompletionPercent}%` }}
+          onPointerDown={handleRowPointerDown}
+          onPointerMove={handleRowPointerMove}
+          onPointerUp={handleRowPointerEnd}
+          onPointerCancel={handleRowPointerEnd}
+        >
+          <div className="flex items-center gap-2.5">
+            <ActionButton
+              color="green"
+              icon="check"
+              label={taskLocked ? "Complete all subtasks first" : `Complete ${task.title}`}
+              onClick={e => {
+                e.stopPropagation()
+                if (!taskLocked) onToggle(task.id)
+              }}
+              disabled={taskLocked}
+              active={task.completed}
+              className="hidden md:grid"
             />
-            <span className="relative font-medium">
-              {completedSubtasks}/{subtasks.length}
-            </span>
-          </span>
-        )}
-
-        <button
-          onClick={showSubtaskEditor}
-          onPointerDown={e => e.stopPropagation()}
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-full border border-gray-200 text-base leading-none text-gray-500 hover:bg-gray-50 hover:text-gray-900"
-          title="Add subtask"
-          aria-label={`Add subtask to ${task.title}`}
-        >
-          +
-        </button>
-
-        <button
-          onClick={e => {
-            e.stopPropagation()
-            if (!taskLocked) onDelete(task.id)
-          }}
-          onPointerDown={e => e.stopPropagation()}
-          disabled={taskLocked}
-          className={`px-2 text-base ${
-            taskLocked
-              ? "cursor-not-allowed text-gray-200"
-              : "text-gray-400 hover:text-red-500 opacity-100 sm:opacity-0 sm:group-hover:opacity-100"
-          }`}
-          title={taskLocked ? "Complete all subtasks first" : "Delete"}
-          aria-label={`Delete ${task.title}`}
-        >
-          ✕
-        </button>
-      </div>
-
-      <div
-        className={`mt-2 space-y-1 border-t border-gray-100 pt-2 ${
-          subtasksCollapsed || (!hasSubtasks && !addingSubtask) ? "hidden" : ""
-        }`}
-      >
-        {subtasks.map(subtask => (
-          <div key={subtask.id} className="space-y-1 pl-8">
-            <div className="flex items-center gap-2 text-xs sm:text-sm">
-              <input
-                type="checkbox"
-                checked={subtask.completed}
-                onChange={() => onToggleSubtask(task.id, subtask.id)}
-                className="h-3.5 w-3.5 cursor-pointer"
-              />
-              {editingSubtaskTitleId === subtask.id ? (
-                <input
-                  className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
-                  value={subtaskTitleInput}
-                  autoFocus
-                  onChange={e => setSubtaskTitleInput(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === "Enter") saveSubtaskTitle(subtask.id)
-                    if (e.key === "Escape") {
-                      setEditingSubtaskTitleId(null)
-                      setSubtaskTitleInput("")
-                    }
-                  }}
-                  onBlur={() => saveSubtaskTitle(subtask.id)}
-                  aria-label={`Rename subtask ${subtask.title}`}
-                />
-              ) : (
-                <span className="min-w-0 flex-1 text-left">
-                  <button
-                    onClick={e => {
-                      e.stopPropagation()
-                      showSubtaskTitleEditor(subtask)
-                    }}
-                    className={`inline-block max-w-full truncate align-bottom ${
-                      subtask.completed ? "line-through text-gray-400" : "text-gray-600"
-                    }`}
-                    title="Rename subtask"
-                    aria-label={`Rename subtask ${subtask.title}`}
-                  >
-                    {subtask.title}
-                  </button>
-                </span>
-              )}
-              <button
-                onClick={() => showLinkEditor(subtask)}
-                className={`grid h-5 w-5 shrink-0 place-items-center rounded-full border text-[11px] leading-none ${
-                  subtask.url
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-                    : "border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-700"
-                }`}
-                title={subtask.url ? "Edit hyperlink" : "Add hyperlink"}
-                aria-label={`${subtask.url ? "Edit" : "Add"} hyperlink for ${subtask.title}`}
-              >
-                ↗
-              </button>
-              <button
-                onClick={() => onDeleteSubtask(task.id, subtask.id)}
-                className="px-1 text-sm text-gray-300 hover:text-red-500"
-                title="Delete subtask"
-                aria-label={`Delete subtask ${subtask.title}`}
-              >
-                ✕
-              </button>
+            <div className="md:hidden">
+              <DragGrip attributes={attributes} listeners={listeners} />
             </div>
 
-            {editingLinkId === subtask.id && (
-              <div className="flex gap-2 pl-5">
+            <div className="min-w-0 flex-1">
+              {editingTaskTitle ? (
                 <input
-                  className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
-                  placeholder="https://example.com"
-                  value={subtaskUrlInput}
+                  className="w-full rounded-xl bg-white px-3 py-2 text-sm text-gray-800 outline-none ring-1 ring-black/5 focus:ring-2 focus:ring-rose-100 sm:text-base"
+                  value={taskTitleInput}
                   autoFocus
-                  onChange={e => setSubtaskUrlInput(e.target.value)}
+                  onPointerDown={e => e.stopPropagation()}
+                  onClick={e => e.stopPropagation()}
+                  onChange={e => setTaskTitleInput(e.target.value)}
                   onKeyDown={e => {
-                    if (e.key === "Enter") saveSubtaskUrl(subtask.id)
+                    if (e.key === "Enter") saveTaskTitle()
                     if (e.key === "Escape") {
-                      setEditingLinkId(null)
-                      setSubtaskUrlInput("")
+                      setTaskTitleInput(task.title)
+                      setEditingTaskTitle(false)
                     }
                   }}
+                  onBlur={saveTaskTitle}
+                  aria-label={`Rename ${task.title}`}
                 />
+              ) : (
                 <button
-                  onClick={() => saveSubtaskUrl(subtask.id)}
-                  className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
-                  aria-label={`Save hyperlink for ${subtask.title}`}
+                  type="button"
+                  onClick={e => {
+                    e.stopPropagation()
+                    toggleSubtasksExpanded()
+                  }}
+                  onPointerDown={e => e.stopPropagation()}
+                  className="flex min-w-0 w-full items-center gap-1.5 rounded-xl text-left"
+                  aria-expanded={subtasksExpanded}
+                  {...desktopDragProps}
                 >
-                  Save
+                  <span className={`min-w-0 truncate text-gray-800 ${task.completed ? "line-through text-gray-400" : ""}`}>
+                    {task.title}
+                  </span>
+                  <LaunchLinkButton url={task.url} label={`Open link for ${task.title}`} />
                 </button>
-                {subtask.url && (
-                  <button
-                    onClick={() => {
-                      onUpdateSubtaskUrl(task.id, subtask.id, "")
-                      setEditingLinkId(null)
-                      setSubtaskUrlInput("")
-                    }}
-                    className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-500 hover:bg-gray-50 sm:text-sm"
-                    aria-label={`Remove hyperlink for ${subtask.title}`}
+              )}
+            </div>
+
+            {subtasks.length > 0 && (
+              <span
+                className="relative isolate h-5 min-w-11 shrink-0 overflow-hidden rounded-full bg-gray-200/70 px-2 text-center text-[11px] leading-5 text-gray-600"
+                aria-label={`${completedSubtasks} of ${subtasks.length} subtasks complete`}
+                title={`${subtaskCompletionPercent}% complete`}
+              >
+                <span
+                  className="absolute inset-y-0 left-0 -z-10 bg-emerald-400 transition-[width] duration-200"
+                  style={{ width: `${subtaskCompletionPercent}%` }}
+                />
+                <span className="relative font-medium">
+                  {completedSubtasks}/{subtasks.length}
+                </span>
+              </span>
+            )}
+
+            <EditMenu
+              open={taskMenuOpen}
+              onToggle={() => setTaskMenuOpen(open => !open)}
+              onRename={() => {
+                setTaskMenuOpen(false)
+                setTaskTitleInput(task.title)
+                setEditingTaskTitle(true)
+              }}
+              onEditLink={() => {
+                setTaskMenuOpen(false)
+                setTaskUrlInput(task.url || "")
+                setEditingTaskLink(true)
+              }}
+              hasLink={Boolean(task.url)}
+              label={`Edit ${task.title}`}
+            />
+            <ActionButton
+              color="red"
+              icon="close"
+              label={taskLocked ? "Complete all subtasks first" : `Delete ${task.title}`}
+              onClick={e => {
+                e.stopPropagation()
+                if (!taskLocked) onDelete(task.id)
+              }}
+              disabled={taskLocked}
+              className="hidden md:grid"
+            />
+          </div>
+
+          {editingTaskLink && (
+            <div className="mt-3 flex gap-2 pl-9">
+              <input
+                className="min-w-0 flex-1 rounded-xl bg-white px-3 py-2 text-xs text-gray-700 outline-none ring-1 ring-black/5 focus:ring-2 focus:ring-rose-100 sm:text-sm"
+                placeholder="https://example.com"
+                value={taskUrlInput}
+                autoFocus
+                onPointerDown={e => e.stopPropagation()}
+                onChange={e => setTaskUrlInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") saveTaskUrl()
+                  if (e.key === "Escape") {
+                    setTaskUrlInput(task.url || "")
+                    setEditingTaskLink(false)
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation()
+                  saveTaskUrl()
+                }}
+                className="rounded-xl bg-white px-3 py-2 text-xs text-gray-600 shadow-sm transition hover:bg-gray-50 sm:text-sm"
+              >
+                Save
+              </button>
+              {task.url && (
+                <button
+                  type="button"
+                  onClick={e => {
+                    e.stopPropagation()
+                    onUpdateTaskUrl(task.id, "")
+                    setTaskUrlInput("")
+                    setEditingTaskLink(false)
+                  }}
+                  className="rounded-xl bg-white px-3 py-2 text-xs text-gray-500 shadow-sm transition hover:bg-gray-50 sm:text-sm"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
+
+          <div
+            className={`mt-2 space-y-2 ${
+              !subtasksExpanded && !addingSubtask ? "hidden" : ""
+            }`}
+          >
+            {subtasks.map(subtask => (
+              <div key={subtask.id} className="pl-9">
+                <div
+                  className={`relative rounded-xl ${
+                    subtaskMenuId === subtask.id ? "overflow-visible" : "overflow-hidden"
+                  }`}
+                >
+                  <div
+                    className="pointer-events-none absolute inset-y-0 left-0 flex items-center px-3 text-[10px] font-medium uppercase tracking-[0.16em] text-emerald-600 opacity-0 transition md:hidden"
+                    style={{ opacity: (subtaskSwipeOffsets[subtask.id] || 0) > 14 ? 1 : 0 }}
                   >
-                    Clear
-                  </button>
+                    Done
+                  </div>
+
+                  <div
+                    className="flex items-center gap-2 rounded-xl py-1.5 text-xs sm:text-sm"
+                    style={{
+                      transform: `translateX(${isDesktop ? 0 : subtaskSwipeOffsets[subtask.id] || 0}px)`,
+                    }}
+                    onPointerDown={e => {
+                      if (!isDesktop) startSubtaskSwipe(subtask.id, e)
+                    }}
+                    onPointerMove={e => {
+                      if (!isDesktop) moveSubtaskSwipe(subtask.id, e)
+                    }}
+                    onPointerUp={() => {
+                      if (!isDesktop) endSubtaskSwipe(subtask)
+                    }}
+                    onPointerCancel={() => {
+                      if (!isDesktop) endSubtaskSwipe(subtask)
+                    }}
+                  >
+                    <ActionButton
+                      color="green"
+                      icon="check"
+                      label={`Complete ${subtask.title}`}
+                      onClick={e => {
+                        e.stopPropagation()
+                        onToggleSubtask(task.id, subtask.id)
+                      }}
+                      active={subtask.completed}
+                      className="hidden md:grid"
+                    />
+                    {editingSubtaskTitleId === subtask.id ? (
+                      <input
+                        className="min-w-0 flex-1 rounded-xl bg-white px-3 py-2 text-xs text-gray-700 outline-none ring-1 ring-black/5 focus:ring-2 focus:ring-rose-100 sm:text-sm"
+                        value={subtaskTitleInput}
+                        autoFocus
+                        onPointerDown={e => e.stopPropagation()}
+                        onChange={e => setSubtaskTitleInput(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") saveSubtaskTitle(subtask.id)
+                          if (e.key === "Escape") {
+                            setEditingSubtaskTitleId(null)
+                            setSubtaskTitleInput("")
+                          }
+                        }}
+                        onBlur={() => saveSubtaskTitle(subtask.id)}
+                        aria-label={`Rename subtask ${subtask.title}`}
+                      />
+                    ) : (
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`min-w-0 truncate ${subtask.completed ? "line-through text-gray-300" : "text-gray-400"}`}>
+                            {subtask.title}
+                          </span>
+                          <LaunchLinkButton
+                            url={subtask.url}
+                            label={`Open link for ${subtask.title}`}
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    <EditMenu
+                      open={subtaskMenuId === subtask.id}
+                      onToggle={() =>
+                        setSubtaskMenuId(current => (current === subtask.id ? null : subtask.id))
+                      }
+                      onRename={() => {
+                        setSubtaskMenuId(null)
+                        setEditingSubtaskLinkId(null)
+                        setSubtaskTitleInput(subtask.title)
+                        setEditingSubtaskTitleId(subtask.id)
+                      }}
+                      onEditLink={() => {
+                        setSubtaskMenuId(null)
+                        setEditingSubtaskTitleId(null)
+                        setSubtaskUrlInput(subtask.url || "")
+                        setEditingSubtaskLinkId(subtask.id)
+                      }}
+                      hasLink={Boolean(subtask.url)}
+                      label={`Edit ${subtask.title}`}
+                    />
+                    <ActionButton
+                      color="red"
+                      icon="close"
+                      label={`Delete ${subtask.title}`}
+                      onClick={e => {
+                        e.stopPropagation()
+                        onDeleteSubtask(task.id, subtask.id)
+                      }}
+                      className="hidden md:grid"
+                    />
+                  </div>
+                </div>
+
+                {editingSubtaskLinkId === subtask.id && (
+                  <div className="mt-1 flex gap-2">
+                    <input
+                      className="min-w-0 flex-1 rounded-xl bg-white px-3 py-2 text-xs text-gray-700 outline-none ring-1 ring-black/5 focus:ring-2 focus:ring-rose-100 sm:text-sm"
+                      placeholder="https://example.com"
+                      value={subtaskUrlInput}
+                      autoFocus
+                      onPointerDown={e => e.stopPropagation()}
+                      onChange={e => setSubtaskUrlInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") saveSubtaskUrl(subtask.id)
+                        if (e.key === "Escape") {
+                          setEditingSubtaskLinkId(null)
+                          setSubtaskUrlInput("")
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => saveSubtaskUrl(subtask.id)}
+                      className="rounded-xl bg-white px-3 py-2 text-xs text-gray-600 shadow-sm transition hover:bg-gray-50 sm:text-sm"
+                    >
+                      Save
+                    </button>
+                    {subtask.url && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onUpdateSubtaskUrl(task.id, subtask.id, "")
+                          setEditingSubtaskLinkId(null)
+                          setSubtaskUrlInput("")
+                        }}
+                        className="rounded-xl bg-white px-3 py-2 text-xs text-gray-500 shadow-sm transition hover:bg-gray-50 sm:text-sm"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
+            ))}
+
+            {addingSubtask ? (
+              <div className="flex gap-2 pl-9">
+                <input
+                  className="min-w-0 flex-1 rounded-xl bg-white px-3 py-2 text-xs text-gray-700 outline-none ring-1 ring-black/5 focus:ring-2 focus:ring-rose-100 sm:text-sm"
+                  placeholder="Add subtask"
+                  value={subtaskInput}
+                  autoFocus
+                  onPointerDown={e => e.stopPropagation()}
+                  onChange={e => setSubtaskInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Enter") handleAddSubtask()
+                  if (e.key === "Escape") {
+                    setSubtaskInput("")
+                    setAddingSubtask(false)
+                    if (!hasSubtasks) setSubtasksExpanded(false)
+                  }
+                }}
+              />
+                <button
+                  type="button"
+                  onClick={handleAddSubtask}
+                  className="rounded-xl bg-white px-3 py-2 text-xs text-gray-600 shadow-sm transition hover:bg-gray-50 sm:text-sm"
+                >
+                  Add
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={e => {
+                  e.stopPropagation()
+                  setSubtasksExpanded(true)
+                  setAddingSubtask(true)
+                }}
+                className="w-full pl-9 text-left text-xs text-gray-400 transition hover:text-gray-600 sm:text-sm"
+              >
+                + add subtask...
+              </button>
             )}
           </div>
-        ))}
-
-        {addingSubtask && (
-          <div className="flex gap-2 pl-8">
-            <input
-              className="min-w-0 flex-1 rounded-md border border-gray-200 px-2 py-1 text-xs sm:text-sm"
-              placeholder="Add subtask"
-              value={subtaskInput}
-              autoFocus
-              onChange={e => setSubtaskInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Enter") handleAddSubtask()
-                if (e.key === "Escape") {
-                  setSubtaskInput("")
-                  setAddingSubtask(false)
-                }
-              }}
-            />
-            <button
-              onClick={handleAddSubtask}
-              className="rounded-md border border-gray-200 px-2 py-1 text-xs text-gray-600 hover:bg-gray-50 sm:text-sm"
-              aria-label={`Save subtask to ${task.title}`}
-            >
-              Add
-            </button>
-          </div>
-        )}
+        </div>
       </div>
     </div>
   )
