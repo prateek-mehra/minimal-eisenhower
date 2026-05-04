@@ -3,7 +3,7 @@
 A clean, minimalist task management application based on the Eisenhower Matrix prioritization framework. Built with React and Vite for fast performance and a streamlined user experience.
 
 <p align="center">
-  <img src="src/assets/where-did-i-apply-demo.gif" width="1000"/>
+  <img src="src/assets/minimal-eisenhower-demo.gif" width="1000"/>
 </p>
 
 [Visit Site](https://minimal-eisenhower.vercel.app)
