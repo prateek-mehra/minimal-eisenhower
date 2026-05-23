@@ -91,6 +91,11 @@ const normalizeSubtask = (subtask, fallbackOrder = 0) => ({
   url: typeof subtask?.url === "string" ? subtask.url : "",
   completed: Boolean(subtask?.completed),
   order: Number.isFinite(subtask?.order) ? subtask.order : fallbackOrder,
+  createdAt: Number.isFinite(subtask?.createdAt)
+    ? subtask.createdAt
+    : Number.isFinite(subtask?.updatedAt)
+      ? subtask.updatedAt
+      : 0,
   updatedAt: Number.isFinite(subtask?.updatedAt) ? subtask.updatedAt : 0,
 })
 
@@ -114,6 +119,11 @@ const normalizeTask = (task, fallbackOrder = 0) => {
     completed: Boolean(task?.completed),
     subtasks: normalizeSubtasks(task?.subtasks),
     order: Number.isFinite(task?.order) ? task.order : fallbackOrder,
+    createdAt: Number.isFinite(task?.createdAt)
+      ? task.createdAt
+      : Number.isFinite(task?.updatedAt)
+        ? task.updatedAt
+        : 0,
     updatedAt: Number.isFinite(task?.updatedAt) ? task.updatedAt : 0,
   }
 }
@@ -148,6 +158,107 @@ const toSignature = (taskList) =>
   )
 
 const DESKTOP_MEDIA_QUERY = "(min-width: 768px)"
+const REPORTS = {
+  daily: "Daily report",
+  weekly: "Weekly report",
+}
+
+const getStartOfDay = (value = new Date()) => {
+  const date = new Date(value)
+  date.setHours(0, 0, 0, 0)
+  return date.getTime()
+}
+
+const getEndOfDay = (value = new Date()) => {
+  const date = new Date(value)
+  date.setHours(23, 59, 59, 999)
+  return date.getTime()
+}
+
+const getStartOfWeek = (value = new Date()) => {
+  const date = new Date(value)
+  date.setHours(0, 0, 0, 0)
+  const day = date.getDay()
+  const mondayOffset = day === 0 ? -6 : 1 - day
+  date.setDate(date.getDate() + mondayOffset)
+  return date.getTime()
+}
+
+const getReportWindow = (type) => {
+  const now = new Date()
+  if (type === "weekly") {
+    return {
+      start: getStartOfWeek(now),
+      end: Date.now(),
+      currentLabel: "This week",
+    }
+  }
+
+  return {
+    start: getStartOfDay(now),
+    end: getEndOfDay(now),
+    currentLabel: "Today",
+  }
+}
+
+const getItemCreatedAt = (item) => {
+  if (Number.isFinite(item?.createdAt) && item.createdAt > 0) return item.createdAt
+  if (Number.isFinite(item?.updatedAt) && item.updatedAt > 0) return item.updatedAt
+  return Date.now()
+}
+
+const getAgeLabel = (timestamp) => {
+  const days = Math.max(
+    0,
+    Math.floor((Date.now() - timestamp) / 86_400_000)
+  )
+
+  if (days === 0) return "since today"
+  if (days < 14) return `since ${days} ${days === 1 ? "day" : "days"}`
+
+  const weeks = Math.floor(days / 7)
+  return `since ${weeks} ${weeks === 1 ? "week" : "weeks"}`
+}
+
+const summarizeReportItems = (items) => {
+  const total = items.length
+  const completed = items.filter(item => item.completed)
+  const remaining = items.filter(item => !item.completed)
+
+  return {
+    completed,
+    remaining,
+    completedPercent: total ? Math.round((completed.length / total) * 100) : 0,
+    remainingPercent: total ? Math.round((remaining.length / total) * 100) : 0,
+  }
+}
+
+const buildReport = (taskList, type) => {
+  const window = getReportWindow(type)
+  const allTasks = normalizeTasks(taskList)
+  const reportItems = allTasks.flatMap(task => [
+    {
+      id: task.id,
+      type: "Task",
+      title: task.title,
+      completed: task.completed,
+      createdAt: getItemCreatedAt(task),
+    },
+    ...normalizeSubtasks(task.subtasks).map(subtask => ({
+      id: subtask.id,
+      type: "Subtask",
+      title: subtask.title,
+      parentTitle: task.title,
+      completed: subtask.completed,
+      createdAt: getItemCreatedAt(subtask),
+    })),
+  ])
+
+  return {
+    ...window,
+    current: summarizeReportItems(reportItems),
+  }
+}
 
 function useIsDesktop() {
   const [isDesktop, setIsDesktop] = useState(() => {
@@ -209,6 +320,7 @@ export default function App() {
   const [syncError, setSyncError] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
   const [zoomedQuadrantId, setZoomedQuadrantId] = useState(null)
+  const [activeReport, setActiveReport] = useState(null)
   const menuRef = useRef(null)
   const isDesktop = useIsDesktop()
 
@@ -228,6 +340,11 @@ export default function App() {
         return a.id.localeCompare(b.id)
       }),
     [tasks]
+  )
+
+  const report = useMemo(
+    () => (activeReport ? buildReport(tasks, activeReport) : null),
+    [activeReport, tasks]
   )
 
   useEffect(() => {
@@ -281,6 +398,19 @@ export default function App() {
       document.removeEventListener("keydown", handleKeyDown)
     }
   }, [zoomedQuadrantId])
+
+  useEffect(() => {
+    if (!activeReport) return undefined
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setActiveReport(null)
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown)
+    return () => document.removeEventListener("keydown", handleKeyDown)
+  }, [activeReport])
 
   useEffect(() => {
     if (!storageIdentity) {
@@ -720,6 +850,7 @@ export default function App() {
         completed: false,
         subtasks: [],
         order: prev.filter(t => t.quadrant === quadrant).length,
+        createdAt: now,
         updatedAt: now,
       }
       return [...prev, newTask]
@@ -775,6 +906,7 @@ export default function App() {
               title: title.trim(),
               completed: false,
               order: subtasks.length,
+              createdAt: now,
               updatedAt: now,
             },
           ],
@@ -1045,8 +1177,26 @@ export default function App() {
                   {user.name.slice(0, 1).toUpperCase()}
                 </button>
 
-                {menuOpen && (
+              {menuOpen && (
                   <div className="absolute right-0 top-12 z-20 min-w-48 rounded-2xl bg-white p-2 shadow-[0_18px_40px_rgba(15,23,42,0.12)]">
+                    <button
+                      onClick={() => {
+                        setActiveReport("daily")
+                        setMenuOpen(false)
+                      }}
+                      className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50"
+                    >
+                      Daily report
+                    </button>
+                    <button
+                      onClick={() => {
+                        setActiveReport("weekly")
+                        setMenuOpen(false)
+                      }}
+                      className="w-full rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition hover:bg-gray-50"
+                    >
+                      Weekly report
+                    </button>
                     <button
                       onClick={() => {
                         clearCompleted()
@@ -1066,6 +1216,7 @@ export default function App() {
                         setTokenExpiry(0)
                         setTasks([])
                         setZoomedQuadrantId(null)
+                        setActiveReport(null)
                         setSyncStatus("idle")
                         setSyncError("")
                         setMenuOpen(false)
@@ -1099,6 +1250,21 @@ export default function App() {
               onClick={() => setZoomedQuadrantId(null)}
               aria-label="Close zoomed section"
             />
+          )}
+          {activeReport && report && (
+            <>
+              <button
+                type="button"
+                className="fixed inset-0 z-30 cursor-default bg-slate-900/18 backdrop-blur-xl"
+                onClick={() => setActiveReport(null)}
+                aria-label="Close report"
+              />
+              <ReportPanel
+                type={activeReport}
+                report={report}
+                onClose={() => setActiveReport(null)}
+              />
+            </>
           )}
           <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-2 md:grid-rows-2">
             {QUADRANTS.map(q => (
@@ -1249,6 +1415,127 @@ function AppFooter({ className = "" }) {
         </a>
       </div>
     </footer>
+  )
+}
+
+function ReportPanel({ type, report, onClose }) {
+  const title = REPORTS[type]
+  const formatDate = (timestamp) =>
+    new Intl.DateTimeFormat(undefined, {
+      month: "short",
+      day: "numeric",
+    }).format(new Date(timestamp))
+
+  const rangeLabel =
+    type === "weekly"
+      ? `${formatDate(report.start)} - ${formatDate(report.end)}`
+      : formatDate(report.start)
+
+  return (
+    <section className="fixed left-1/2 top-1/2 z-40 flex h-[min(78dvh,44rem)] w-[min(92vw,46rem)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-[28px] border border-white/70 bg-white/82 p-4 shadow-[0_32px_90px_rgba(15,23,42,0.25),inset_0_1px_0_rgba(255,255,255,0.88)] ring-1 ring-black/5 backdrop-blur-2xl">
+      <div className="mb-4 border-b border-white/70 pb-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-base font-semibold text-gray-900 sm:text-lg">
+            {title}
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="grid h-8 w-8 place-items-center rounded-full text-gray-400 transition hover:bg-white/50 hover:text-gray-700"
+            aria-label="Close report"
+            title="Close report"
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none">
+              <path d="M4 4 12 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              <path d="M12 4 4 12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-gray-500 sm:text-sm">{rangeLabel}</p>
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto pr-1">
+        <ReportGroup label={report.currentLabel} data={report.current} />
+      </div>
+    </section>
+  )
+}
+
+function ReportGroup({ label, data }) {
+  return (
+    <div className="rounded-2xl bg-white/75 p-3">
+      <div className="mb-3">
+        <h3 className="text-sm font-medium text-gray-800">{label}</h3>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <ReportItemSection
+          label="Remaining"
+          percent={data.remainingPercent}
+          tone="remaining"
+          items={data.remaining}
+        />
+        <ReportItemSection
+          label="Completed"
+          percent={data.completedPercent}
+          tone="completed"
+          items={data.completed}
+        />
+      </div>
+    </div>
+  )
+}
+
+function ReportPercent({ value, tone }) {
+  const toneClasses =
+    tone === "completed"
+      ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
+      : "bg-rose-50 text-rose-700 ring-1 ring-rose-100"
+
+  return (
+    <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs ${toneClasses}`}>
+      <span className="font-medium">{value}%</span>
+    </span>
+  )
+}
+
+function ReportItemSection({ label, percent, tone, items }) {
+  return (
+    <div className="min-w-0 rounded-xl bg-white/65 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <h4 className="text-xs font-medium uppercase tracking-[0.14em] text-gray-400">
+          {label}
+        </h4>
+        <ReportPercent value={percent} tone={tone} />
+      </div>
+      {items.length > 0 ? (
+        <div className="space-y-1.5">
+          {items.map(item => (
+            <div key={`${item.type}-${item.id}`} className="min-w-0 text-sm">
+              <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[11px] text-gray-500">
+                    {item.type}
+                  </span>
+                  <span className="min-w-0 truncate text-gray-700">{item.title}</span>
+                </div>
+                {tone === "remaining" && (
+                  <span className="shrink-0 justify-self-end text-right text-xs font-medium text-rose-600">
+                    {getAgeLabel(item.createdAt)}
+                  </span>
+                )}
+              </div>
+              {item.parentTitle && (
+                <p className="mt-0.5 truncate pl-16 text-xs text-gray-400">
+                  {item.parentTitle}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="text-sm text-gray-400">No items</p>
+      )}
+    </div>
   )
 }
 
