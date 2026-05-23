@@ -208,6 +208,7 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState("idle")
   const [syncError, setSyncError] = useState("")
   const [menuOpen, setMenuOpen] = useState(false)
+  const [zoomedQuadrantId, setZoomedQuadrantId] = useState(null)
   const menuRef = useRef(null)
   const isDesktop = useIsDesktop()
 
@@ -253,6 +254,33 @@ export default function App() {
     document.addEventListener("pointerdown", handlePointerDown)
     return () => document.removeEventListener("pointerdown", handlePointerDown)
   }, [menuOpen])
+
+  useEffect(() => {
+    if (!zoomedQuadrantId) return undefined
+
+    const handlePointerDown = (event) => {
+      const zoomedPanel = event.target.closest(
+        `[data-quadrant-panel="${zoomedQuadrantId}"]`
+      )
+
+      if (!zoomedPanel) {
+        setZoomedQuadrantId(null)
+      }
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setZoomedQuadrantId(null)
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown)
+    document.addEventListener("keydown", handleKeyDown)
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown)
+      document.removeEventListener("keydown", handleKeyDown)
+    }
+  }, [zoomedQuadrantId])
 
   useEffect(() => {
     if (!storageIdentity) {
@@ -1037,6 +1065,7 @@ export default function App() {
                         setAccessToken(null)
                         setTokenExpiry(0)
                         setTasks([])
+                        setZoomedQuadrantId(null)
                         setSyncStatus("idle")
                         setSyncError("")
                         setMenuOpen(false)
@@ -1063,6 +1092,14 @@ export default function App() {
           collisionDetection={closestCenter}
           onDragEnd={handleDragEnd}
         >
+          {zoomedQuadrantId && (
+            <button
+              type="button"
+              className="fixed inset-0 z-30 cursor-default bg-slate-900/18 backdrop-blur-xl"
+              onClick={() => setZoomedQuadrantId(null)}
+              aria-label="Close zoomed section"
+            />
+          )}
           <div className="grid grid-cols-1 gap-4 md:min-h-0 md:flex-1 md:grid-cols-2 md:grid-rows-2">
             {QUADRANTS.map(q => (
               <Quadrant
@@ -1070,6 +1107,9 @@ export default function App() {
                 quadrant={q}
                 tasks={sortedTasks.filter(t => t.quadrant === q.id)}
                 isDesktop={isDesktop}
+                isZoomed={zoomedQuadrantId === q.id}
+                isDimmed={Boolean(zoomedQuadrantId) && zoomedQuadrantId !== q.id}
+                onRequestZoom={setZoomedQuadrantId}
                 onAddTask={addTask}
                 onToggleTask={toggleTask}
                 onUpdateTaskTitle={updateTaskTitle}
@@ -1230,6 +1270,9 @@ function Quadrant({
   quadrant,
   tasks,
   isDesktop,
+  isZoomed,
+  isDimmed,
+  onRequestZoom,
   onAddTask,
   onToggleTask,
   onUpdateTaskTitle,
@@ -1243,6 +1286,7 @@ function Quadrant({
 }) {
   const [input, setInput] = useState("")
   const [addingTask, setAddingTask] = useState(false)
+  const zoomPointerRef = useRef(null)
 
   const { setNodeRef } = useDroppable({
     id: quadrant.id,
@@ -1254,6 +1298,38 @@ function Quadrant({
     onAddTask(input, quadrant.id)
     setInput("")
     setAddingTask(false)
+  }
+
+  const isZoomSurfaceEvent = (event) => {
+    return !event.target.closest(
+      "[data-task-card], [data-quadrant-control], button, input, a, textarea, select"
+    )
+  }
+
+  const handleSurfacePointerDown = (event) => {
+    if (!isZoomSurfaceEvent(event)) {
+      zoomPointerRef.current = null
+      return
+    }
+
+    zoomPointerRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    }
+  }
+
+  const handleSurfacePointerUp = (event) => {
+    const pointer = zoomPointerRef.current
+    zoomPointerRef.current = null
+    if (!pointer || pointer.pointerId !== event.pointerId) return
+    if (!isZoomSurfaceEvent(event)) return
+
+    const deltaX = event.clientX - pointer.x
+    const deltaY = event.clientY - pointer.y
+    if (Math.hypot(deltaX, deltaY) > 8) return
+
+    onRequestZoom(quadrant.id)
   }
 
   const toneClasses = {
@@ -1274,9 +1350,16 @@ function Quadrant({
 
   return (
     <div
+      onPointerDownCapture={handleSurfacePointerDown}
+      onPointerUpCapture={handleSurfacePointerUp}
+      data-quadrant-panel={quadrant.id}
       className={`flex flex-col rounded-[28px] p-4 md:min-h-[18rem] ${
         toneClasses[quadrant.tone]
-      } md:min-h-0`}
+      } ${
+        isZoomed
+          ? "fixed left-1/2 top-1/2 z-40 h-[min(78dvh,44rem)] w-[min(92vw,46rem)] -translate-x-1/2 -translate-y-1/2 border border-white/70 bg-white/82 shadow-[0_32px_90px_rgba(15,23,42,0.25),inset_0_1px_0_rgba(255,255,255,0.88)] ring-1 ring-black/5 backdrop-blur-2xl md:min-h-0"
+          : "md:min-h-0"
+      } ${isDimmed ? "pointer-events-none blur-[2px] opacity-45" : ""}`}
     >
       <div className="mb-4 border-b border-white/70 pb-3">
         <div className="flex items-center justify-between gap-3">
@@ -1289,6 +1372,15 @@ function Quadrant({
           >
             {quadrant.title}
           </h2>
+          <button
+            type="button"
+            className="-my-2 min-h-8 flex-1 cursor-zoom-in rounded-xl transition hover:bg-white/30"
+            onClick={event => {
+              event.stopPropagation()
+              onRequestZoom(quadrant.id)
+            }}
+            aria-label={`Zoom ${quadrant.title}`}
+          />
           <span className={`text-[11px] uppercase tracking-[0.18em] ${countClasses}`}>
             {tasks.length}
           </span>
@@ -1323,7 +1415,7 @@ function Quadrant({
         </div>
       </SortableContext>
 
-      <div className="mt-3">
+      <div className="mt-3" data-quadrant-control>
         {addingTask ? (
           <input
             className="w-full rounded-2xl bg-white/85 px-3 py-3 text-sm text-gray-800 outline-none ring-1 ring-black/5 transition focus:bg-white focus:ring-2 focus:ring-emerald-100"
@@ -1796,7 +1888,12 @@ function SortableTask({
   }
 
   return (
-    <div ref={setNodeRef} style={style} className="relative text-sm sm:text-base">
+    <div
+      ref={setNodeRef}
+      style={style}
+      className="relative text-sm sm:text-base"
+      data-task-card
+    >
       <div
         className="relative overflow-hidden rounded-2xl bg-white/75"
         onClick={() => {
